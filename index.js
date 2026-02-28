@@ -1,18 +1,90 @@
 require("dotenv").config();
 const express = require("express");
+const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 app.use(express.json());
 
-// Health check (Render uses this)
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const LUMA_API_KEY = process.env.LUMA_API_KEY;
+
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+  throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
+}
+if (!LUMA_API_KEY) {
+  throw new Error("Missing LUMA_API_KEY");
+}
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
+// Health check
 app.get("/", (req, res) => {
   res.json({ ok: true, service: "dailymenu-worker" });
 });
 
-// We'll add real endpoints in Step 3
-app.post("/jobs/test", async (req, res) => {
-  res.json({ ok: true, message: "Worker is running", body: req.body });
+// POST /jobs/start  (creates placeholder jobs in DB)
+app.post("/jobs/start", async (req, res) => {
+  try {
+    const { date } = req.body || {};
+
+    let query = supabase
+      .from("daily_menus")
+      .select("id, menu_date, status, menu_json, media_json, music_json")
+      .eq("status", "published")
+      .order("menu_date", { ascending: false })
+      .limit(1);
+
+    if (date) query = query.eq("menu_date", date);
+
+    const { data: menuRow, error } = await query.maybeSingle();
+    if (error) throw error;
+    if (!menuRow) return res.status(404).json({ ok: false, error: "No published menu found." });
+
+    const menu = menuRow.menu_json?.menu;
+    if (!menu) return res.status(400).json({ ok: false, error: "menu_json.menu missing" });
+
+    // Hands-only prompts (real Luma call will be wired next step)
+    const prompts = {
+      soup: `Hands-only cooking video: ${menu.soup.title_en}. Close-up chopping and stirring. No faces. No narration.`,
+      main: `Hands-only cooking video: ${menu.main.title_en}. Mixing, shaping, cooking, plating. No faces. No narration.`,
+      salad: `Hands-only cooking video: ${menu.salad.title_en}. Chopping vegetables, mixing bowl, plating. No faces. No narration.`,
+      side: `Hands-only cooking video: ${menu.side.title_en}. Rinsing, simmering, fluffing, serving. No faces. No narration.`,
+    };
+
+    // Placeholder job ids (for now)
+    const jobs = {
+      soup: { id: `fake_${Math.random().toString(16).slice(2)}`, prompt: prompts.soup },
+      main: { id: `fake_${Math.random().toString(16).slice(2)}`, prompt: prompts.main },
+      salad: { id: `fake_${Math.random().toString(16).slice(2)}`, prompt: prompts.salad },
+      side: { id: `fake_${Math.random().toString(16).slice(2)}`, prompt: prompts.side },
+    };
+
+    const { error: upErr } = await supabase
+      .from("daily_menus")
+      .update({
+        job_status: "generating",
+        luma_jobs: {
+          created_at: new Date().toISOString(),
+          provider: "luma",
+          jobs,
+        },
+      })
+      .eq("id", menuRow.id);
+
+    if (upErr) throw upErr;
+
+    return res.json({
+      ok: true,
+      menu_date: menuRow.menu_date,
+      message: "Saved placeholder Luma jobs to Supabase. Next step will call real Luma API.",
+      jobs,
+    });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ ok: false, error: e.message || String(e) });
+  }
 });
 
 const port = process.env.PORT || 3001;
-app.listen(port, () => console.log(`Worker listening on ${port}`));
+app.listen(port, "0.0.0.0", () => console.log(`Worker listening on ${port}`));
