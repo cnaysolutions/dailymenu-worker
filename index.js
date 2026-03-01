@@ -180,3 +180,91 @@ app.post("/jobs/poll", async (req, res) => {
     return res.status(500).json({ ok: false, error: e.message || String(e) });
   }
 });
+app.post("/jobs/attach-videos", async (req, res) => {
+  try {
+    const { date } = req.body || {};
+
+    // Get latest published menu (or specific date)
+    let query = supabase
+      .from("daily_menus")
+      .select("id, menu_date, luma_jobs, media_json")
+      .eq("status", "published")
+      .order("menu_date", { ascending: false })
+      .limit(1);
+
+    if (date) query = query.eq("menu_date", date);
+
+    const { data: menuRow, error } = await query.maybeSingle();
+    if (error) throw error;
+    if (!menuRow) return res.status(404).json({ ok: false, error: "No published menu found." });
+
+    const poll = menuRow.luma_jobs?.last_poll_result;
+    if (!poll) {
+      return res.status(400).json({ ok: false, error: "No last_poll_result found. Run /jobs/poll first." });
+    }
+
+    const menuDate = menuRow.menu_date;
+    const bucket = "menu-media";
+    const updatedMedia = menuRow.media_json || {};
+    const uploaded = {};
+
+    for (const dish of ["soup", "main", "salad", "side"]) {
+      const info = poll[dish];
+      const state = info?.state;
+      const videoUrl = info?.assets?.video;
+
+      if (state !== "completed" || !videoUrl) {
+        uploaded[dish] = { skipped: true, state, videoUrl: videoUrl || null };
+        continue;
+      }
+
+      // 1) download mp4 from Luma
+      const r = await fetch(videoUrl);
+      if (!r.ok) {
+        uploaded[dish] = { error: `Download failed ${r.status}` };
+        continue;
+      }
+
+      const arrayBuffer = await r.arrayBuffer();
+      const bytes = new Uint8Array(arrayBuffer);
+
+      // 2) upload into Supabase Storage
+      const path = `${menuDate}/${dish}/final.mp4`;
+
+      const { error: upErr } = await supabase.storage
+        .from(bucket)
+        .upload(path, bytes, {
+          contentType: "video/mp4",
+          upsert: true,
+        });
+
+      if (upErr) {
+        uploaded[dish] = { error: `Upload failed: ${upErr.message}` };
+        continue;
+      }
+
+      // 3) public URL
+      const { data: pub } = supabase.storage.from(bucket).getPublicUrl(path);
+      const publicUrl = pub.publicUrl;
+
+      // 4) update media_json
+      updatedMedia[dish] = updatedMedia[dish] || {};
+      updatedMedia[dish].video = publicUrl;
+
+      uploaded[dish] = { ok: true, publicUrl };
+    }
+
+    // Save media_json back
+    const { error: saveErr } = await supabase
+      .from("daily_menus")
+      .update({ media_json: updatedMedia })
+      .eq("id", menuRow.id);
+
+    if (saveErr) throw saveErr;
+
+    return res.json({ ok: true, menu_date: menuDate, uploaded });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ ok: false, error: e.message || String(e) });
+  }
+});
