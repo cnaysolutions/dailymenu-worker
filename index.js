@@ -227,6 +227,119 @@ app.post("/jobs/mix-music", async (req, res) => {
   }
 });
 const port = process.env.PORT || 3001;
+// --- Simple safety validator (no pork / no alcohol) ---
+function assertNoForbidden(text) {
+  const t = (text || "").toLowerCase();
+
+  const forbidden = [
+    // pork family
+    "pork", "bacon", "ham", "lard", "prosciutto", "pepperoni", "salami", "pancetta",
+    "domuz", "jambon",
+    // alcohol family (ingredients)
+    "wine", "beer", "vodka", "whiskey", "rum", "brandy", "gin", "champagne", "alcohol"
+  ];
+
+  const hit = forbidden.find(w => t.includes(w));
+  if (hit) throw new Error(`Forbidden item detected: ${hit}`);
+}
+
+async function callClaudeJSON(prompt) {
+  const model = process.env.CLAUDE_MODEL || "claude-opus-4-6";
+  const key = process.env.CLAUDE_API_KEY;
+  if (!key) throw new Error("Missing CLAUDE_API_KEY");
+
+  const resp = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "x-api-key": key,
+      "anthropic-version": "2023-06-01",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: 2500,
+      temperature: 0.7,
+      messages: [{ role: "user", content: prompt }],
+    }),
+  });
+
+  const text = await resp.text();
+  if (!resp.ok) throw new Error(`Claude API failed: ${resp.status} ${text}`);
+
+  const json = JSON.parse(text);
+  const out = json?.content?.[0]?.text;
+  if (!out) throw new Error("Claude returned empty content");
+
+  // Claude must output ONLY JSON (we will parse it)
+  return JSON.parse(out);
+}
+function buildMenuPrompt(dateISO) {
+  return `
+You generate a Muslim-friendly daily menu for a buffet website.
+
+HARD RULES:
+- Absolutely NO pork or pork-derived products.
+- No alcohol ingredients.
+- Recipe text must be ENGLISH only.
+- Output ONLY valid JSON (no markdown, no explanations).
+
+MENU:
+Generate exactly: soup + main + salad + side.
+
+For each dish:
+- title_en
+- description_en (1–2 sentences)
+- ingredients: list of {name, quantity, unit}
+- steps: list of 6–10 short steps (overlay-friendly)
+- serving_size_g (number)
+- diet_tags (array of strings)
+- image_prompts: (soup/salad/side 1–2 prompts, main 3–5 prompts)
+
+Return JSON in this exact shape:
+{
+  "date": "${dateISO}",
+  "language": "en",
+  "rules_confirmed": { "no_pork": true, "no_alcohol": true },
+  "allergen_notes_en": "...",
+  "menu": {
+    "soup": { ... },
+    "main": { ... },
+    "salad": { ... },
+    "side": { ... }
+  }
+}
+`.trim();
+}
+
+// POST /menu/generate  Body: { date?: "YYYY-MM-DD" }
+app.post("/menu/generate", async (req, res) => {
+  try {
+    const dateISO = req.body?.date || new Date().toISOString().slice(0, 10);
+
+    const prompt = buildMenuPrompt(dateISO);
+    const menuObj = await callClaudeJSON(prompt);
+
+    // quick safety scan
+    assertNoForbidden(JSON.stringify(menuObj));
+
+    // Save as draft (or overwrite draft for same date)
+    const { error } = await supabase
+      .from("daily_menus")
+      .upsert({
+        menu_date: dateISO,
+        status: "draft",
+        language: "en",
+        menu_json: menuObj,
+      }, { onConflict: "menu_date" });
+
+    if (error) throw error;
+
+    return res.json({ ok: true, menu_date: dateISO, status: "draft" });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ ok: false, error: e.message || String(e) });
+  }
+});
 app.listen(port, "0.0.0.0", () => console.log(`Worker listening on ${port}`));
 async function getLumaJob(jobId) {
   const resp = await fetch(`https://api.lumalabs.ai/dream-machine/v1/generations/${jobId}`, {
