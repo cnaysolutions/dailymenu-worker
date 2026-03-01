@@ -231,17 +231,17 @@ app.post("/menu/generate", async (req, res) => {
       try {
         menuObj = await callClaudeMenuWithTool(dateISO);
 
-        // ✅ validate structure exists
+        // Validate structure exists
         const menu = menuObj?.menu;
         if (!menu?.soup || !menu?.main || !menu?.salad || !menu?.side) {
           throw new Error("Claude output missing menu.soup/main/salad/side");
         }
 
-        // safety scan
+        // Safety scan
         assertNoForbidden(JSON.stringify(menuObj));
 
         lastErr = null;
-        break; // success
+        break;
       } catch (e) {
         lastErr = e;
         menuObj = null;
