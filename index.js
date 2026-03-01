@@ -5,9 +5,9 @@ const { createClient } = require("@supabase/supabase-js");
 const app = express();
 app.use(express.json());
 
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const LUMA_API_KEY = process.env.LUMA_API_KEY;
+const SUPABASE_URL = process.env.https://hwuhwqmixioehvshmila.supabase.co;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh3dWh3cW1peGlvZWh2c2htaWxhIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3MjE3NjYyNywiZXhwIjoyMDg3NzUyNjI3fQ._whRwVn2macEGX1TS0tZuxPtYWhzMhm5sbcmmX3ZUK0;
+const LUMA_API_KEY = process.env.luma-2f7dd6ab-91ae-4848-8b32-784052186974-e2721181-78c3-4a07-b1be-40995d0d63df;
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
   throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
@@ -18,12 +18,29 @@ if (!LUMA_API_KEY) {
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
+// ✅ REAL Luma create call (Step 5)
+async function createLumaVideo(prompt) {
+  const resp = await fetch("https://api.lumalabs.ai/dream-machine/v1/generations", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.LUMA_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ prompt }),
+  });
+
+  const text = await resp.text();
+  if (!resp.ok) throw new Error(`Luma create failed: ${resp.status} ${text}`);
+
+  return JSON.parse(text);
+}
+
 // Health check
 app.get("/", (req, res) => {
   res.json({ ok: true, service: "dailymenu-worker" });
 });
 
-// POST /jobs/start  (creates placeholder jobs in DB)
+// POST /jobs/start  (creates REAL Luma jobs in DB)
 app.post("/jobs/start", async (req, res) => {
   try {
     const { date } = req.body || {};
@@ -44,7 +61,7 @@ app.post("/jobs/start", async (req, res) => {
     const menu = menuRow.menu_json?.menu;
     if (!menu) return res.status(400).json({ ok: false, error: "menu_json.menu missing" });
 
-    // Hands-only prompts (real Luma call will be wired next step)
+    // Hands-only prompts
     const prompts = {
       soup: `Hands-only cooking video: ${menu.soup.title_en}. Close-up chopping and stirring. No faces. No narration.`,
       main: `Hands-only cooking video: ${menu.main.title_en}. Mixing, shaping, cooking, plating. No faces. No narration.`,
@@ -52,14 +69,15 @@ app.post("/jobs/start", async (req, res) => {
       side: `Hands-only cooking video: ${menu.side.title_en}. Rinsing, simmering, fluffing, serving. No faces. No narration.`,
     };
 
-    // Placeholder job ids (for now)
+    // ✅ Step 5.3: REPLACE placeholder jobs with real Luma jobs
     const jobs = {
-      soup: { id: `fake_${Math.random().toString(16).slice(2)}`, prompt: prompts.soup },
-      main: { id: `fake_${Math.random().toString(16).slice(2)}`, prompt: prompts.main },
-      salad: { id: `fake_${Math.random().toString(16).slice(2)}`, prompt: prompts.salad },
-      side: { id: `fake_${Math.random().toString(16).slice(2)}`, prompt: prompts.side },
+      soup: await createLumaVideo(prompts.soup),
+      main: await createLumaVideo(prompts.main),
+      salad: await createLumaVideo(prompts.salad),
+      side: await createLumaVideo(prompts.side),
     };
 
+    // Save job info into Supabase
     const { error: upErr } = await supabase
       .from("daily_menus")
       .update({
@@ -67,6 +85,7 @@ app.post("/jobs/start", async (req, res) => {
         luma_jobs: {
           created_at: new Date().toISOString(),
           provider: "luma",
+          prompts,
           jobs,
         },
       })
@@ -77,7 +96,7 @@ app.post("/jobs/start", async (req, res) => {
     return res.json({
       ok: true,
       menu_date: menuRow.menu_date,
-      message: "Saved placeholder Luma jobs to Supabase. Next step will call real Luma API.",
+      message: "Created REAL Luma jobs and saved to Supabase.",
       jobs,
     });
   } catch (e) {
