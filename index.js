@@ -5,9 +5,9 @@ const { createClient } = require("@supabase/supabase-js");
 const app = express();
 app.use(express.json());
 
-const SUPABASE_URL = process.env.https://hwuhwqmixioehvshmila.supabase.co;
-const SUPABASE_SERVICE_ROLE_KEY = process.env.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh3dWh3cW1peGlvZWh2c2htaWxhIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3MjE3NjYyNywiZXhwIjoyMDg3NzUyNjI3fQ._whRwVn2macEGX1TS0tZuxPtYWhzMhm5sbcmmX3ZUK0;
-const LUMA_API_KEY = process.env.luma-2f7dd6ab-91ae-4848-8b32-784052186974-e2721181-78c3-4a07-b1be-40995d0d63df;
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const LUMA_API_KEY = process.env.LUMA_API_KEY;
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
   throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
