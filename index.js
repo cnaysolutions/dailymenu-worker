@@ -1,4 +1,5 @@
 // --- Node deps ---
+const { jsonrepair } = require("jsonrepair");
 const fs = require("fs");
 const path = require("path");
 const { execFile } = require("child_process");
@@ -119,9 +120,14 @@ async function callClaudeJSON(prompt) {
   const out = json?.content?.[0]?.text;
 
   const jsonText = extractJsonObject(out);
+  try {
   return JSON.parse(jsonText);
+} catch (e) {
+  // Auto-fix small JSON mistakes from the model (missing commas, trailing commas, etc.)
+  const repaired = jsonrepair(jsonText);
+  return JSON.parse(repaired);
 }
-
+}
 // Menu prompt builder
 function buildMenuPrompt(dateISO) {
   return `
