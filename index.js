@@ -110,3 +110,73 @@ app.post("/jobs/start", async (req, res) => {
 
 const port = process.env.PORT || 3001;
 app.listen(port, "0.0.0.0", () => console.log(`Worker listening on ${port}`));
+async function getLumaJob(jobId) {
+  const resp = await fetch(`https://api.lumalabs.ai/dream-machine/v1/generations/${jobId}`, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${process.env.LUMA_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+  });
+
+  const text = await resp.text();
+  if (!resp.ok) throw new Error(`Luma get failed: ${resp.status} ${text}`);
+  return JSON.parse(text);
+}
+app.post("/jobs/poll", async (req, res) => {
+  try {
+    const { date } = req.body || {};
+
+    // Get the menu row (latest published OR by date)
+    let query = supabase
+      .from("daily_menus")
+      .select("id, menu_date, status, luma_jobs, media_json")
+      .eq("status", "published")
+      .order("menu_date", { ascending: false })
+      .limit(1);
+
+    if (date) query = query.eq("menu_date", date);
+
+    const { data: menuRow, error } = await query.maybeSingle();
+    if (error) throw error;
+    if (!menuRow) return res.status(404).json({ ok: false, error: "No published menu found." });
+
+    const jobs = menuRow.luma_jobs?.jobs;
+    if (!jobs) return res.status(400).json({ ok: false, error: "luma_jobs.jobs missing. Run /jobs/start first." });
+
+    // Poll each job
+    const result = {};
+    for (const dish of ["soup", "main", "salad", "side"]) {
+      const jobObj = jobs[dish];
+      const jobId = jobObj?.id;
+      if (!jobId) {
+        result[dish] = { status: "missing_job_id" };
+        continue;
+      }
+
+      const info = await getLumaJob(jobId);
+
+      // Save whole info for debugging
+      result[dish] = info;
+    }
+
+    // Save poll result back to Supabase (optional but helpful)
+    const { error: upErr } = await supabase
+      .from("daily_menus")
+      .update({
+        luma_jobs: {
+          ...(menuRow.luma_jobs || {}),
+          last_polled_at: new Date().toISOString(),
+          last_poll_result: result,
+        },
+      })
+      .eq("id", menuRow.id);
+
+    if (upErr) throw upErr;
+
+    return res.json({ ok: true, menu_date: menuRow.menu_date, result });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ ok: false, error: e.message || String(e) });
+  }
+});
