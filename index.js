@@ -27,7 +27,6 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
 if (!LUMA_API_KEY) {
   throw new Error("Missing LUMA_API_KEY");
 }
-// Claude key is required only for /menu/generate; we check inside that function.
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
@@ -38,10 +37,26 @@ function assertNoForbidden(text) {
   const t = (text || "").toLowerCase();
   const forbidden = [
     // pork family
-    "pork", "bacon", "ham", "lard", "prosciutto", "pepperoni", "salami", "pancetta",
-    "domuz", "jambon",
+    "pork",
+    "bacon",
+    "ham",
+    "lard",
+    "prosciutto",
+    "pepperoni",
+    "salami",
+    "pancetta",
+    "domuz",
+    "jambon",
     // alcohol
-    "wine", "beer", "vodka", "whiskey", "rum", "brandy", "gin", "champagne", "alcohol",
+    "wine",
+    "beer",
+    "vodka",
+    "whiskey",
+    "rum",
+    "brandy",
+    "gin",
+    "champagne",
+    "alcohol",
   ];
   const hit = forbidden.find((w) => t.includes(w));
   if (hit) throw new Error(`Forbidden item detected: ${hit}`);
@@ -56,7 +71,11 @@ function runFfmpeg(args) {
   });
 }
 
-// ---- Claude tool-output menu generation (no JSON parsing issues)
+function getStatusToUse(req) {
+  return req.body?.status || "draft"; // default draft (safe)
+}
+
+// ---- Claude tool-output menu generation
 async function callClaudeMenuWithTool(dateISO) {
   if (!CLAUDE_API_KEY) throw new Error("Missing CLAUDE_API_KEY in Render env vars");
 
@@ -86,9 +105,9 @@ async function callClaudeMenuWithTool(dateISO) {
                 additionalProperties: false,
                 properties: {
                   no_pork: { type: "boolean" },
-                  no_alcohol: { type: "boolean" }
+                  no_alcohol: { type: "boolean" },
                 },
-                required: ["no_pork", "no_alcohol"]
+                required: ["no_pork", "no_alcohol"],
               },
               allergen_notes_en: { type: "string" },
               menu: {
@@ -98,10 +117,10 @@ async function callClaudeMenuWithTool(dateISO) {
                   soup: { $ref: "#/$defs/dish" },
                   main: { $ref: "#/$defs/dish" },
                   salad: { $ref: "#/$defs/dish" },
-                  side: { $ref: "#/$defs/dish" }
+                  side: { $ref: "#/$defs/dish" },
                 },
-                required: ["soup", "main", "salad", "side"]
-              }
+                required: ["soup", "main", "salad", "side"],
+              },
             },
             required: ["date", "language", "rules_confirmed", "allergen_notes_en", "menu"],
             $defs: {
@@ -111,9 +130,9 @@ async function callClaudeMenuWithTool(dateISO) {
                 properties: {
                   name: { type: "string" },
                   quantity: { type: "number" },
-                  unit: { type: "string" }
+                  unit: { type: "string" },
                 },
-                required: ["name", "quantity", "unit"]
+                required: ["name", "quantity", "unit"],
               },
               dish: {
                 type: "object",
@@ -125,16 +144,21 @@ async function callClaudeMenuWithTool(dateISO) {
                   steps: { type: "array", items: { type: "string" }, minItems: 6 },
                   serving_size_g: { type: "number" },
                   diet_tags: { type: "array", items: { type: "string" } },
-                  image_prompts: { type: "array", items: { type: "string" }, minItems: 1 }
+                  image_prompts: { type: "array", items: { type: "string" }, minItems: 1 },
                 },
                 required: [
-                  "title_en", "description_en", "ingredients", "steps",
-                  "serving_size_g", "diet_tags", "image_prompts"
-                ]
-              }
-            }
-          }
-        }
+                  "title_en",
+                  "description_en",
+                  "ingredients",
+                  "steps",
+                  "serving_size_g",
+                  "diet_tags",
+                  "image_prompts",
+                ],
+              },
+            },
+          },
+        },
       ],
       tool_choice: { type: "tool", name: "submit_menu" },
       messages: [
@@ -143,9 +167,10 @@ async function callClaudeMenuWithTool(dateISO) {
           content:
             `Generate a Muslim-friendly daily menu for date ${dateISO}. ` +
             `Hard rules: no pork, no alcohol ingredients, English only. ` +
-            `Return the result by calling the submit_menu tool.`
-        }
-      ]
+            `Also: do NOT mention the word "pork" anywhere (not even "pork-free"). ` +
+            `Return by calling the submit_menu tool.`,
+        },
+      ],
     }),
   });
 
@@ -153,15 +178,10 @@ async function callClaudeMenuWithTool(dateISO) {
   if (!resp.ok) throw new Error(`Claude API failed: ${resp.status} ${raw}`);
 
   const json = JSON.parse(raw);
-  const toolUse = (json.content || []).find(
-    (c) => c.type === "tool_use" && c.name === "submit_menu"
-  );
+  const toolUse = (json.content || []).find((c) => c.type === "tool_use" && c.name === "submit_menu");
+  if (!toolUse || !toolUse.input) throw new Error("Claude did not return submit_menu tool output");
 
-  if (!toolUse || !toolUse.input) {
-    throw new Error("Claude did not return submit_menu tool output");
-  }
-
-  return toolUse.input;
+  return toolUse.input; // structured object
 }
 
 // ---- Luma
@@ -172,10 +192,7 @@ async function createLumaVideo(prompt) {
       Authorization: `Bearer ${LUMA_API_KEY}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      prompt,
-      model: "ray-2",
-    }),
+    body: JSON.stringify({ prompt, model: "ray-2" }),
   });
 
   const text = await resp.text();
@@ -200,78 +217,17 @@ async function getLumaJob(jobId) {
 // ----------------------------------------------------
 // Routes
 // ----------------------------------------------------
+app.get("/", (req, res) => res.json({ ok: true, service: "dailymenu-worker" }));
 
-// Health check
-app.get("/", (req, res) => {
-  res.json({ ok: true, service: "dailymenu-worker" });
-});
-
-// ✅ Generate menu draft using Claude (tool output)
+// Generate menu (draft)
 app.post("/menu/generate", async (req, res) => {
   try {
     const dateISO = req.body?.date || new Date().toISOString().slice(0, 10);
 
     const menuObj = await callClaudeMenuWithTool(dateISO);
 
-    // Safety scan
-    app.post("/menu/generate", async (req, res) => {
-  try {
-    const dateISO = req.body?.date || new Date().toISOString().slice(0, 10);
-
-    let menuObj = null;
-    let lastErr = null;
-
-    for (let attempt = 1; attempt <= 5; attempt++) {
-      try {
-        // IMPORTANT: strengthen instruction: do not even mention the word "pork"
-        const prompt =
-          `Generate a Muslim-friendly daily menu for date ${dateISO}. ` +
-          `Hard rules: NEVER include pork or alcohol ingredients. ` +
-          `Also: DO NOT mention the word "pork" anywhere in the output (not even "pork-free"). ` +
-          `English only. Output the menu.`;
-
-        // If your code uses tool-output:
-        // menuObj = await callClaudeMenuWithTool(dateISO);
-        // If your code uses text prompt:
-        menuObj = await callClaudeJSON(prompt);
-
-        // Safety scan
-        app.post("/menu/generate", async (req, res) => {
-  try {
-    const dateISO = req.body?.date || new Date().toISOString().slice(0, 10);
-
-    let menuObj = null;
-    let lastErr = null;
-
-    for (let attempt = 1; attempt <= 5; attempt++) {
-      try {
-        // IMPORTANT: strengthen instruction: do not even mention the word "pork"
-        const prompt =
-          `Generate a Muslim-friendly daily menu for date ${dateISO}. ` +
-          `Hard rules: NEVER include pork or alcohol ingredients. ` +
-          `Also: DO NOT mention the word "pork" anywhere in the output (not even "pork-free"). ` +
-          `English only. Output the menu.`;
-
-        // If your code uses tool-output:
-        // menuObj = await callClaudeMenuWithTool(dateISO);
-        // If your code uses text prompt:
-        menuObj = await callClaudeJSON(prompt);
-
-        // Safety scan
-        assertNoForbidden(JSON.stringify(menuObj));
-
-        // Passed
-        lastErr = null;
-        break;
-      } catch (e) {
-        lastErr = e;
-        menuObj = null;
-      }
-    }
-
-    if (!menuObj) {
-      throw new Error(`Menu generation failed after retries: ${lastErr?.message || lastErr}`);
-    }
+    // strict safety scan
+    assertNoForbidden(JSON.stringify(menuObj));
 
     const { error } = await supabase
       .from("daily_menus")
@@ -294,66 +250,34 @@ app.post("/menu/generate", async (req, res) => {
   }
 });
 
-        // Passed
-        lastErr = null;
-        break;
-      } catch (e) {
-        lastErr = e;
-        menuObj = null;
-      }
-    }
+// Publish: draft -> published (same date)
+app.post("/menu/publish", async (req, res) => {
+  try {
+    const dateISO = req.body?.date || new Date().toISOString().slice(0, 10);
 
-    if (!menuObj) {
-      throw new Error(`Menu generation failed after retries: ${lastErr?.message || lastErr}`);
-    }
-
-    const { error } = await supabase
+    const { data, error } = await supabase
       .from("daily_menus")
-      .upsert(
-        {
-          menu_date: dateISO,
-          status: "draft",
-          language: "en",
-          menu_json: menuObj,
-        },
-        { onConflict: "menu_date" }
-      );
+      .update({ status: "published" })
+      .eq("menu_date", dateISO)
+      .eq("status", "draft")
+      .select("menu_date,status")
+      .maybeSingle();
 
     if (error) throw error;
+    if (!data) return res.status(404).json({ ok: false, error: "No draft menu found for that date." });
 
-    return res.json({ ok: true, menu_date: dateISO, status: "draft" });
-  } catch (e) {
-    console.error(e);
-    return res.status(500).json({ ok: false, error: e.message || String(e) });
-  }
-});;
-
-    const { error } = await supabase
-      .from("daily_menus")
-      .upsert(
-        {
-          menu_date: dateISO,
-          status: "draft",
-          language: "en",
-          menu_json: menuObj,
-        },
-        { onConflict: "menu_date" }
-      );
-
-    if (error) throw error;
-
-    return res.json({ ok: true, menu_date: dateISO, status: "draft" });
+    return res.json({ ok: true, menu_date: data.menu_date, status: data.status });
   } catch (e) {
     console.error(e);
     return res.status(500).json({ ok: false, error: e.message || String(e) });
   }
 });
 
-// ✅ Start Luma jobs (currently uses latest PUBLISHED menu)
+// Start Luma jobs (draft or published)
 app.post("/jobs/start", async (req, res) => {
   try {
     const { date } = req.body || {};
-    const statusToUse = req.body?.status || "draft";
+    const statusToUse = getStatusToUse(req);
 
     let query = supabase
       .from("daily_menus")
@@ -368,8 +292,15 @@ app.post("/jobs/start", async (req, res) => {
     if (error) throw error;
     if (!menuRow) return res.status(404).json({ ok: false, error: `No ${statusToUse} menu found.` });
 
-    const menu = menuRow.menu_json?.menu;
-    if (!menu) return res.status(400).json({ ok: false, error: "menu_json.menu missing" });
+    // ✅ Support both shapes:
+    // - menu_json = { date, ..., menu: {soup,...} }
+    // - menu_json = {soup,...} (rare)
+    const root = menuRow.menu_json || {};
+    const menu = root.menu || root;
+
+    if (!menu?.soup || !menu?.main || !menu?.salad || !menu?.side) {
+      return res.status(400).json({ ok: false, error: "Menu structure missing soup/main/salad/side" });
+    }
 
     const prompts = {
       soup: `Hands-only cooking video: ${menu.soup.title_en}. Close-up chopping and stirring. No faces. No narration.`,
@@ -407,15 +338,16 @@ app.post("/jobs/start", async (req, res) => {
   }
 });
 
-// ✅ Poll Luma jobs
+// Poll Luma jobs
 app.post("/jobs/poll", async (req, res) => {
   try {
     const { date } = req.body || {};
+    const statusToUse = getStatusToUse(req);
 
     let query = supabase
       .from("daily_menus")
-      .select("id, menu_date, luma_jobs")
-    .eq("status", statusToUse)
+      .select("id, menu_date, status, luma_jobs")
+      .eq("status", statusToUse)
       .order("menu_date", { ascending: false })
       .limit(1);
 
@@ -423,7 +355,7 @@ app.post("/jobs/poll", async (req, res) => {
 
     const { data: menuRow, error } = await query.maybeSingle();
     if (error) throw error;
-    if (!menuRow) return res.status(404).json({ ok: false, error: "No published menu found." });
+    if (!menuRow) return res.status(404).json({ ok: false, error: `No ${statusToUse} menu found.` });
 
     const jobs = menuRow.luma_jobs?.jobs;
     if (!jobs) return res.status(400).json({ ok: false, error: "luma_jobs.jobs missing. Run /jobs/start first." });
@@ -451,18 +383,18 @@ app.post("/jobs/poll", async (req, res) => {
 
     if (upErr) throw upErr;
 
-    return res.json({ ok: true, menu_date: menuRow.menu_date, result });
+    return res.json({ ok: true, status: statusToUse, menu_date: menuRow.menu_date, result });
   } catch (e) {
     console.error(e);
     return res.status(500).json({ ok: false, error: e.message || String(e) });
   }
 });
 
-// ✅ Attach videos into Supabase Storage + update media_json
+// Attach finished Luma videos to Supabase Storage + update media_json
 app.post("/jobs/attach-videos", async (req, res) => {
   try {
     const { date } = req.body || {};
-    const statusToUse = req.body?.status || "draft";
+    const statusToUse = getStatusToUse(req);
 
     let query = supabase
       .from("daily_menus")
@@ -537,12 +469,12 @@ app.post("/jobs/attach-videos", async (req, res) => {
   }
 });
 
-// ✅ Bake music into MP4 and update media_json videos to final_music.mp4
+// Bake music into MP4 and update media_json videos to final_music.mp4
 app.post("/jobs/mix-music", async (req, res) => {
   try {
     const { date, lang } = req.body || {};
     const useLang = lang || "tr";
-    const statusToUse = req.body?.status || "draft";
+    const statusToUse = getStatusToUse(req);
 
     let query = supabase
       .from("daily_menus")
@@ -595,14 +527,20 @@ app.post("/jobs/mix-music", async (req, res) => {
 
       const ffArgs = [
         "-y",
-        "-i", inVideo,
-        "-stream_loop", "-1",
-        "-i", inMusic,
-        "-c:v", "copy",
-        "-c:a", "aac",
-        "-b:a", "192k",
+        "-i",
+        inVideo,
+        "-stream_loop",
+        "-1",
+        "-i",
+        inMusic,
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
         "-shortest",
-        outVideo
+        outVideo,
       ];
 
       await runFfmpeg(ffArgs);
@@ -644,8 +582,7 @@ app.post("/jobs/mix-music", async (req, res) => {
     return res.status(500).json({ ok: false, error: e.message || String(e) });
   }
 });
-// ----------------------------------------------------
-// Start server
+
 // ----------------------------------------------------
 const port = process.env.PORT || 3001;
 app.listen(port, "0.0.0.0", () => console.log(`Worker listening on ${port}`));
