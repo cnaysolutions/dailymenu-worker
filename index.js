@@ -1,3 +1,7 @@
+const fs = require("fs");
+const path = require("path");
+const { execFile } = require("child_process");
+const tmp = require("tmp");
 require("dotenv").config();
 const express = require("express");
 const { createClient } = require("@supabase/supabase-js");
@@ -107,7 +111,121 @@ app.post("/jobs/start", async (req, res) => {
     return res.status(500).json({ ok: false, error: e.message || String(e) });
   }
 });
+app.post("/jobs/mix-music", async (req, res) => {
+  try {
+    const { date, lang } = req.body || {};
+    const useLang = lang || "tr";
 
+    let query = supabase
+      .from("daily_menus")
+      .select("id, menu_date, status, media_json, music_json")
+      .eq("status", "published")
+      .order("menu_date", { ascending: false })
+      .limit(1);
+
+    if (date) query = query.eq("menu_date", date);
+
+    const { data: menuRow, error } = await query.maybeSingle();
+    if (error) throw error;
+    if (!menuRow) return res.status(404).json({ ok: false, error: "No published menu found." });
+
+    const menuDate = menuRow.menu_date;
+    const media = menuRow.media_json || {};
+    const musicUrl = menuRow.music_json?.[useLang];
+
+    if (!musicUrl) {
+      return res.status(400).json({ ok: false, error: `music_json.${useLang} missing` });
+    }
+
+    const bucket = "menu-media";
+    const results = {};
+
+    for (const dish of ["soup", "main", "salad", "side"]) {
+      const videoUrl = media?.[dish]?.video;
+      if (!videoUrl) {
+        results[dish] = { skipped: true, reason: "no videoUrl in media_json" };
+        continue;
+      }
+
+      // Temp files
+      const tmpDir = tmp.dirSync({ unsafeCleanup: true });
+      const inVideo = path.join(tmpDir.name, "in.mp4");
+      const inMusic = path.join(tmpDir.name, "music.mp3");
+      const outVideo = path.join(tmpDir.name, "out.mp4");
+
+      // Download video
+      const vr = await fetch(videoUrl);
+      if (!vr.ok) {
+        results[dish] = { error: `Video download failed ${vr.status}` };
+        tmpDir.removeCallback();
+        continue;
+      }
+      fs.writeFileSync(inVideo, Buffer.from(await vr.arrayBuffer()));
+
+      // Download music
+      const mr = await fetch(musicUrl);
+      if (!mr.ok) {
+        results[dish] = { error: `Music download failed ${mr.status}` };
+        tmpDir.removeCallback();
+        continue;
+      }
+      fs.writeFileSync(inMusic, Buffer.from(await mr.arrayBuffer()));
+
+      // Mix: keep video, replace/add audio, shortest wins (5s video)
+      // -stream_loop -1 loops music if video longer; safe here too
+      const ffArgs = [
+        "-y",
+        "-i", inVideo,
+        "-stream_loop", "-1",
+        "-i", inMusic,
+        "-c:v", "copy",
+        "-c:a", "aac",
+        "-b:a", "192k",
+        "-shortest",
+        outVideo
+      ];
+
+      await runFfmpeg(ffArgs);
+
+      const outBytes = fs.readFileSync(outVideo);
+
+      // Upload as final_music.mp4
+      const outPath = `${menuDate}/${dish}/final_music.mp4`;
+      const { error: upErr } = await supabase.storage
+        .from(bucket)
+        .upload(outPath, outBytes, { contentType: "video/mp4", upsert: true });
+
+      if (upErr) {
+        results[dish] = { error: `Upload failed: ${upErr.message}` };
+        tmpDir.removeCallback();
+        continue;
+      }
+
+      const { data: pub } = supabase.storage.from(bucket).getPublicUrl(outPath);
+      const publicUrl = pub.publicUrl;
+
+      // Update media_json to point to music version
+      media[dish] = media[dish] || {};
+      media[dish].video = publicUrl;
+
+      results[dish] = { ok: true, publicUrl };
+      tmpDir.removeCallback();
+    }
+
+    // Save updated media_json
+    const { error: saveErr } = await supabase
+      .from("daily_menus")
+      .update({ media_json: media })
+      .eq("id", menuRow.id);
+
+    if (saveErr) throw saveErr;
+
+    return res.json({ ok: true, menu_date: menuDate, lang: useLang, results });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ ok: false, error: e.message || String(e) });
+  }
+});
 const port = process.env.PORT || 3001;
 app.listen(port, "0.0.0.0", () => console.log(`Worker listening on ${port}`));
 async function getLumaJob(jobId) {
@@ -122,6 +240,16 @@ async function getLumaJob(jobId) {
   const text = await resp.text();
   if (!resp.ok) throw new Error(`Luma get failed: ${resp.status} ${text}`);
   return JSON.parse(text);
+}
+function runFfmpeg(args) {
+  return new Promise((resolve, reject) => {
+    execFile(path.join(__dirname, "bin", "ffmpeg"), args, (err, stdout, stderr) => {
+      if (err) {
+        return reject(new Error(`ffmpeg failed: ${stderr || err.message}`));
+      }
+      resolve({ stdout, stderr });
+    });
+  });
 }
 app.post("/jobs/poll", async (req, res) => {
   try {
