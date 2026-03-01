@@ -271,7 +271,15 @@ async function callClaudeJSON(prompt) {
   if (!out) throw new Error("Claude returned empty content");
 
   // Claude must output ONLY JSON (we will parse it)
-  return JSON.parse(out);
+  // Clean possible ```json ... ``` wrappers
+let cleaned = out.trim();
+// Remove ```json or ``` at start
+cleaned = cleaned.replace(/^```(?:json)?\s*/i, "");
+
+// Remove ending ```
+cleaned = cleaned.replace(/```$/i, "").trim();
+
+return JSON.parse(cleaned);
 }
 function buildMenuPrompt(dateISO) {
   return `
