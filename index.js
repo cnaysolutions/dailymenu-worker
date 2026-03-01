@@ -1,5 +1,4 @@
 // --- Node deps ---
-const { jsonrepair } = require("jsonrepair");
 const fs = require("fs");
 const path = require("path");
 const { execFile } = require("child_process");
@@ -16,7 +15,9 @@ app.use(express.json());
 // --- ENV ---
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
 const LUMA_API_KEY = process.env.LUMA_API_KEY;
+
 const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY;
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-opus-4-6";
 
@@ -26,46 +27,26 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
 if (!LUMA_API_KEY) {
   throw new Error("Missing LUMA_API_KEY");
 }
-// Claude key is only required when calling /menu/generate
-// so we don't throw here.
+// Claude key is required only for /menu/generate; we check inside that function.
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 // ----------------------------------------------------
 // Helpers
 // ----------------------------------------------------
-
-// Safety validator (no pork / no alcohol)
 function assertNoForbidden(text) {
   const t = (text || "").toLowerCase();
   const forbidden = [
     // pork family
-    "pork",
-    "bacon",
-    "ham",
-    "lard",
-    "prosciutto",
-    "pepperoni",
-    "salami",
-    "pancetta",
-    "domuz",
-    "jambon",
+    "pork", "bacon", "ham", "lard", "prosciutto", "pepperoni", "salami", "pancetta",
+    "domuz", "jambon",
     // alcohol
-    "wine",
-    "beer",
-    "vodka",
-    "whiskey",
-    "rum",
-    "brandy",
-    "gin",
-    "champagne",
-    "alcohol",
+    "wine", "beer", "vodka", "whiskey", "rum", "brandy", "gin", "champagne", "alcohol",
   ];
   const hit = forbidden.find((w) => t.includes(w));
   if (hit) throw new Error(`Forbidden item detected: ${hit}`);
 }
 
-// Run ffmpeg (installed in ./bin/ffmpeg on Render)
 function runFfmpeg(args) {
   return new Promise((resolve, reject) => {
     execFile(path.join(__dirname, "bin", "ffmpeg"), args, (err, stdout, stderr) => {
@@ -75,27 +56,8 @@ function runFfmpeg(args) {
   });
 }
 
-// Extract JSON object from Claude output safely
-function extractJsonObject(text) {
-  if (!text) throw new Error("Claude returned empty content");
-
-  let cleaned = text.trim();
-
-  // remove ```json ... ``` wrappers if present
-  cleaned = cleaned.replace(/^```(?:json)?\s*/i, "");
-  cleaned = cleaned.replace(/```$/i, "").trim();
-
-  // extract first {...} block
-  const start = cleaned.indexOf("{");
-  const end = cleaned.lastIndexOf("}");
-  if (start === -1 || end === -1 || end <= start) {
-    throw new Error("Claude output did not contain a JSON object");
-  }
-  return cleaned.slice(start, end + 1);
-}
-
-// Claude call - expects JSON output
-async function callClaudeJSON(prompt) {
+// ---- Claude tool-output menu generation (no JSON parsing issues)
+async function callClaudeMenuWithTool(dateISO) {
   if (!CLAUDE_API_KEY) throw new Error("Missing CLAUDE_API_KEY in Render env vars");
 
   const resp = await fetch("https://api.anthropic.com/v1/messages", {
@@ -109,7 +71,81 @@ async function callClaudeJSON(prompt) {
       model: CLAUDE_MODEL,
       max_tokens: 2500,
       temperature: 0.7,
-      messages: [{ role: "user", content: prompt }],
+      tools: [
+        {
+          name: "submit_menu",
+          description: "Submit a Muslim-friendly daily menu in strict structured JSON.",
+          input_schema: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              date: { type: "string" },
+              language: { type: "string", enum: ["en"] },
+              rules_confirmed: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  no_pork: { type: "boolean" },
+                  no_alcohol: { type: "boolean" }
+                },
+                required: ["no_pork", "no_alcohol"]
+              },
+              allergen_notes_en: { type: "string" },
+              menu: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  soup: { $ref: "#/$defs/dish" },
+                  main: { $ref: "#/$defs/dish" },
+                  salad: { $ref: "#/$defs/dish" },
+                  side: { $ref: "#/$defs/dish" }
+                },
+                required: ["soup", "main", "salad", "side"]
+              }
+            },
+            required: ["date", "language", "rules_confirmed", "allergen_notes_en", "menu"],
+            $defs: {
+              ingredient: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  name: { type: "string" },
+                  quantity: { type: "number" },
+                  unit: { type: "string" }
+                },
+                required: ["name", "quantity", "unit"]
+              },
+              dish: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  title_en: { type: "string" },
+                  description_en: { type: "string" },
+                  ingredients: { type: "array", items: { $ref: "#/$defs/ingredient" }, minItems: 3 },
+                  steps: { type: "array", items: { type: "string" }, minItems: 6 },
+                  serving_size_g: { type: "number" },
+                  diet_tags: { type: "array", items: { type: "string" } },
+                  image_prompts: { type: "array", items: { type: "string" }, minItems: 1 }
+                },
+                required: [
+                  "title_en", "description_en", "ingredients", "steps",
+                  "serving_size_g", "diet_tags", "image_prompts"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      tool_choice: { type: "tool", name: "submit_menu" },
+      messages: [
+        {
+          role: "user",
+          content:
+            `Generate a Muslim-friendly daily menu for date ${dateISO}. ` +
+            `Hard rules: no pork, no alcohol ingredients, English only. ` +
+            `Return the result by calling the submit_menu tool.`
+        }
+      ]
     }),
   });
 
@@ -117,57 +153,18 @@ async function callClaudeJSON(prompt) {
   if (!resp.ok) throw new Error(`Claude API failed: ${resp.status} ${raw}`);
 
   const json = JSON.parse(raw);
-  const out = json?.content?.[0]?.text;
+  const toolUse = (json.content || []).find(
+    (c) => c.type === "tool_use" && c.name === "submit_menu"
+  );
 
-  const jsonText = extractJsonObject(out);
-  try {
-  return JSON.parse(jsonText);
-} catch (e) {
-  // Auto-fix small JSON mistakes from the model (missing commas, trailing commas, etc.)
-  const repaired = jsonrepair(jsonText);
-  return JSON.parse(repaired);
-}
-}
-// Menu prompt builder
-function buildMenuPrompt(dateISO) {
-  return `
-You generate a Muslim-friendly daily menu for a buffet website.
-
-HARD RULES:
-- Absolutely NO pork or pork-derived products.
-- No alcohol ingredients.
-- Recipe text must be ENGLISH only.
-- Output ONLY valid JSON (no markdown, no explanations).
-
-MENU:
-Generate exactly: soup + main + salad + side.
-
-For each dish:
-- title_en
-- description_en (1–2 sentences)
-- ingredients: list of {name, quantity, unit}
-- steps: list of 6–10 short steps (overlay-friendly)
-- serving_size_g (number)
-- diet_tags (array of strings)
-- image_prompts: (soup/salad/side 1–2 prompts, main 3–5 prompts)
-
-Return JSON in this exact shape:
-{
-  "date": "${dateISO}",
-  "language": "en",
-  "rules_confirmed": { "no_pork": true, "no_alcohol": true },
-  "allergen_notes_en": "...",
-  "menu": {
-    "soup": { ... },
-    "main": { ... },
-    "salad": { ... },
-    "side": { ... }
+  if (!toolUse || !toolUse.input) {
+    throw new Error("Claude did not return submit_menu tool output");
   }
-}
-`.trim();
+
+  return toolUse.input;
 }
 
-// Luma create
+// ---- Luma
 async function createLumaVideo(prompt) {
   const resp = await fetch("https://api.lumalabs.ai/dream-machine/v1/generations", {
     method: "POST",
@@ -186,7 +183,6 @@ async function createLumaVideo(prompt) {
   return JSON.parse(text);
 }
 
-// Luma get
 async function getLumaJob(jobId) {
   const resp = await fetch(`https://api.lumalabs.ai/dream-machine/v1/generations/${jobId}`, {
     method: "GET",
@@ -210,18 +206,16 @@ app.get("/", (req, res) => {
   res.json({ ok: true, service: "dailymenu-worker" });
 });
 
-// Generate menu draft using Claude
+// ✅ Generate menu draft using Claude (tool output)
 app.post("/menu/generate", async (req, res) => {
   try {
     const dateISO = req.body?.date || new Date().toISOString().slice(0, 10);
 
-    const prompt = buildMenuPrompt(dateISO);
-    const menuObj = await callClaudeJSON(prompt);
+    const menuObj = await callClaudeMenuWithTool(dateISO);
 
-    // safety scan
+    // Safety scan
     assertNoForbidden(JSON.stringify(menuObj));
 
-    // Save draft for the day
     const { error } = await supabase
       .from("daily_menus")
       .upsert(
@@ -243,14 +237,14 @@ app.post("/menu/generate", async (req, res) => {
   }
 });
 
-// Create real Luma jobs (uses latest PUBLISHED menu for now)
+// ✅ Start Luma jobs (currently uses latest PUBLISHED menu)
 app.post("/jobs/start", async (req, res) => {
   try {
     const { date } = req.body || {};
 
     let query = supabase
       .from("daily_menus")
-      .select("id, menu_date, status, menu_json, media_json, music_json")
+      .select("id, menu_date, status, menu_json")
       .eq("status", "published")
       .order("menu_date", { ascending: false })
       .limit(1);
@@ -293,26 +287,21 @@ app.post("/jobs/start", async (req, res) => {
 
     if (upErr) throw upErr;
 
-    return res.json({
-      ok: true,
-      menu_date: menuRow.menu_date,
-      message: "Created REAL Luma jobs and saved to Supabase.",
-      jobs,
-    });
+    return res.json({ ok: true, menu_date: menuRow.menu_date, jobs });
   } catch (e) {
     console.error(e);
     return res.status(500).json({ ok: false, error: e.message || String(e) });
   }
 });
 
-// Poll Luma jobs and store last_poll_result
+// ✅ Poll Luma jobs
 app.post("/jobs/poll", async (req, res) => {
   try {
     const { date } = req.body || {};
 
     let query = supabase
       .from("daily_menus")
-      .select("id, menu_date, status, luma_jobs, media_json")
+      .select("id, menu_date, luma_jobs")
       .eq("status", "published")
       .order("menu_date", { ascending: false })
       .limit(1);
@@ -356,7 +345,7 @@ app.post("/jobs/poll", async (req, res) => {
   }
 });
 
-// Attach finished Luma videos to Supabase Storage and update media_json
+// ✅ Attach videos into Supabase Storage + update media_json
 app.post("/jobs/attach-videos", async (req, res) => {
   try {
     const { date } = req.body || {};
@@ -420,7 +409,11 @@ app.post("/jobs/attach-videos", async (req, res) => {
       uploaded[dish] = { ok: true, publicUrl };
     }
 
-    const { error: saveErr } = await supabase.from("daily_menus").update({ media_json: updatedMedia }).eq("id", menuRow.id);
+    const { error: saveErr } = await supabase
+      .from("daily_menus")
+      .update({ media_json: updatedMedia })
+      .eq("id", menuRow.id);
+
     if (saveErr) throw saveErr;
 
     return res.json({ ok: true, menu_date: menuDate, uploaded });
@@ -430,7 +423,7 @@ app.post("/jobs/attach-videos", async (req, res) => {
   }
 });
 
-// Mix music into each dish video (writes final_music.mp4)
+// ✅ Bake music into MP4 and update media_json videos to final_music.mp4
 app.post("/jobs/mix-music", async (req, res) => {
   try {
     const { date, lang } = req.body || {};
@@ -438,7 +431,7 @@ app.post("/jobs/mix-music", async (req, res) => {
 
     let query = supabase
       .from("daily_menus")
-      .select("id, menu_date, status, media_json, music_json")
+      .select("id, menu_date, media_json, music_json")
       .eq("status", "published")
       .order("menu_date", { ascending: false })
       .limit(1);
@@ -487,20 +480,14 @@ app.post("/jobs/mix-music", async (req, res) => {
 
       const ffArgs = [
         "-y",
-        "-i",
-        inVideo,
-        "-stream_loop",
-        "-1",
-        "-i",
-        inMusic,
-        "-c:v",
-        "copy",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "192k",
+        "-i", inVideo,
+        "-stream_loop", "-1",
+        "-i", inMusic,
+        "-c:v", "copy",
+        "-c:a", "aac",
+        "-b:a", "192k",
         "-shortest",
-        outVideo,
+        outVideo
       ];
 
       await runFfmpeg(ffArgs);
@@ -529,7 +516,11 @@ app.post("/jobs/mix-music", async (req, res) => {
       tmpDir.removeCallback();
     }
 
-    const { error: saveErr } = await supabase.from("daily_menus").update({ media_json: media }).eq("id", menuRow.id);
+    const { error: saveErr } = await supabase
+      .from("daily_menus")
+      .update({ media_json: media })
+      .eq("id", menuRow.id);
+
     if (saveErr) throw saveErr;
 
     return res.json({ ok: true, menu_date: menuDate, lang: useLang, results });
@@ -540,7 +531,7 @@ app.post("/jobs/mix-music", async (req, res) => {
 });
 
 // ----------------------------------------------------
-// Start server (ALWAYS at bottom)
+// Start server
 // ----------------------------------------------------
 const port = process.env.PORT || 3001;
 app.listen(port, "0.0.0.0", () => console.log(`Worker listening on ${port}`));
