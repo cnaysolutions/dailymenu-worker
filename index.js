@@ -353,11 +353,12 @@ app.post("/menu/generate", async (req, res) => {
 app.post("/jobs/start", async (req, res) => {
   try {
     const { date } = req.body || {};
+    const statusToUse = req.body?.status || "draft";
 
     let query = supabase
       .from("daily_menus")
       .select("id, menu_date, status, menu_json")
-      .eq("status", "published")
+      .eq("status", statusToUse)
       .order("menu_date", { ascending: false })
       .limit(1);
 
@@ -365,7 +366,7 @@ app.post("/jobs/start", async (req, res) => {
 
     const { data: menuRow, error } = await query.maybeSingle();
     if (error) throw error;
-    if (!menuRow) return res.status(404).json({ ok: false, error: "No published menu found." });
+    if (!menuRow) return res.status(404).json({ ok: false, error: `No ${statusToUse} menu found.` });
 
     const menu = menuRow.menu_json?.menu;
     if (!menu) return res.status(400).json({ ok: false, error: "menu_json.menu missing" });
@@ -399,7 +400,7 @@ app.post("/jobs/start", async (req, res) => {
 
     if (upErr) throw upErr;
 
-    return res.json({ ok: true, menu_date: menuRow.menu_date, jobs });
+    return res.json({ ok: true, status: statusToUse, menu_date: menuRow.menu_date, jobs });
   } catch (e) {
     console.error(e);
     return res.status(500).json({ ok: false, error: e.message || String(e) });
@@ -414,7 +415,7 @@ app.post("/jobs/poll", async (req, res) => {
     let query = supabase
       .from("daily_menus")
       .select("id, menu_date, luma_jobs")
-      .eq("status", "published")
+    .eq("status", statusToUse)
       .order("menu_date", { ascending: false })
       .limit(1);
 
@@ -461,11 +462,12 @@ app.post("/jobs/poll", async (req, res) => {
 app.post("/jobs/attach-videos", async (req, res) => {
   try {
     const { date } = req.body || {};
+    const statusToUse = req.body?.status || "draft";
 
     let query = supabase
       .from("daily_menus")
-      .select("id, menu_date, luma_jobs, media_json")
-      .eq("status", "published")
+      .select("id, menu_date, status, luma_jobs, media_json")
+      .eq("status", statusToUse)
       .order("menu_date", { ascending: false })
       .limit(1);
 
@@ -473,7 +475,7 @@ app.post("/jobs/attach-videos", async (req, res) => {
 
     const { data: menuRow, error } = await query.maybeSingle();
     if (error) throw error;
-    if (!menuRow) return res.status(404).json({ ok: false, error: "No published menu found." });
+    if (!menuRow) return res.status(404).json({ ok: false, error: `No ${statusToUse} menu found.` });
 
     const poll = menuRow.luma_jobs?.last_poll_result;
     if (!poll) return res.status(400).json({ ok: false, error: "No last_poll_result found. Run /jobs/poll first." });
@@ -528,7 +530,7 @@ app.post("/jobs/attach-videos", async (req, res) => {
 
     if (saveErr) throw saveErr;
 
-    return res.json({ ok: true, menu_date: menuDate, uploaded });
+    return res.json({ ok: true, status: statusToUse, menu_date: menuDate, uploaded });
   } catch (e) {
     console.error(e);
     return res.status(500).json({ ok: false, error: e.message || String(e) });
@@ -540,11 +542,12 @@ app.post("/jobs/mix-music", async (req, res) => {
   try {
     const { date, lang } = req.body || {};
     const useLang = lang || "tr";
+    const statusToUse = req.body?.status || "draft";
 
     let query = supabase
       .from("daily_menus")
-      .select("id, menu_date, media_json, music_json")
-      .eq("status", "published")
+      .select("id, menu_date, status, media_json, music_json")
+      .eq("status", statusToUse)
       .order("menu_date", { ascending: false })
       .limit(1);
 
@@ -552,7 +555,7 @@ app.post("/jobs/mix-music", async (req, res) => {
 
     const { data: menuRow, error } = await query.maybeSingle();
     if (error) throw error;
-    if (!menuRow) return res.status(404).json({ ok: false, error: "No published menu found." });
+    if (!menuRow) return res.status(404).json({ ok: false, error: `No ${statusToUse} menu found.` });
 
     const menuDate = menuRow.menu_date;
     const media = menuRow.media_json || {};
@@ -635,13 +638,12 @@ app.post("/jobs/mix-music", async (req, res) => {
 
     if (saveErr) throw saveErr;
 
-    return res.json({ ok: true, menu_date: menuDate, lang: useLang, results });
+    return res.json({ ok: true, status: statusToUse, menu_date: menuDate, lang: useLang, results });
   } catch (e) {
     console.error(e);
     return res.status(500).json({ ok: false, error: e.message || String(e) });
   }
 });
-
 // ----------------------------------------------------
 // Start server
 // ----------------------------------------------------
