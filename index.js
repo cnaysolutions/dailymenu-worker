@@ -224,10 +224,33 @@ app.post("/menu/generate", async (req, res) => {
   try {
     const dateISO = req.body?.date || new Date().toISOString().slice(0, 10);
 
-    const menuObj = await callClaudeMenuWithTool(dateISO);
+    let menuObj = null;
+    let lastErr = null;
 
-    // strict safety scan
-    assertNoForbidden(JSON.stringify(menuObj));
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      try {
+        menuObj = await callClaudeMenuWithTool(dateISO);
+
+        // ✅ validate structure exists
+        const menu = menuObj?.menu;
+        if (!menu?.soup || !menu?.main || !menu?.salad || !menu?.side) {
+          throw new Error("Claude output missing menu.soup/main/salad/side");
+        }
+
+        // safety scan
+        assertNoForbidden(JSON.stringify(menuObj));
+
+        lastErr = null;
+        break; // success
+      } catch (e) {
+        lastErr = e;
+        menuObj = null;
+      }
+    }
+
+    if (!menuObj) {
+      throw new Error(`Menu generation failed after retries: ${lastErr?.message || lastErr}`);
+    }
 
     const { error } = await supabase
       .from("daily_menus")
@@ -249,7 +272,6 @@ app.post("/menu/generate", async (req, res) => {
     return res.status(500).json({ ok: false, error: e.message || String(e) });
   }
 });
-
 // Publish: draft -> published (same date)
 app.post("/menu/publish", async (req, res) => {
   try {
