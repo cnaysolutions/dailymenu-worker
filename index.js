@@ -26,7 +26,10 @@ async function createLumaVideo(prompt) {
       Authorization: `Bearer ${process.env.LUMA_API_KEY}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ prompt }),
+    body: JSON.stringify({
+  prompt,
+  model: "ray-2"
+}),
   });
 
   const text = await resp.text();
