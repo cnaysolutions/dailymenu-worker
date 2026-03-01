@@ -214,7 +214,119 @@ app.post("/menu/generate", async (req, res) => {
     const menuObj = await callClaudeMenuWithTool(dateISO);
 
     // Safety scan
-    assertNoForbidden(JSON.stringify(menuObj));
+    app.post("/menu/generate", async (req, res) => {
+  try {
+    const dateISO = req.body?.date || new Date().toISOString().slice(0, 10);
+
+    let menuObj = null;
+    let lastErr = null;
+
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      try {
+        // IMPORTANT: strengthen instruction: do not even mention the word "pork"
+        const prompt =
+          `Generate a Muslim-friendly daily menu for date ${dateISO}. ` +
+          `Hard rules: NEVER include pork or alcohol ingredients. ` +
+          `Also: DO NOT mention the word "pork" anywhere in the output (not even "pork-free"). ` +
+          `English only. Output the menu.`;
+
+        // If your code uses tool-output:
+        // menuObj = await callClaudeMenuWithTool(dateISO);
+        // If your code uses text prompt:
+        menuObj = await callClaudeJSON(prompt);
+
+        // Safety scan
+        app.post("/menu/generate", async (req, res) => {
+  try {
+    const dateISO = req.body?.date || new Date().toISOString().slice(0, 10);
+
+    let menuObj = null;
+    let lastErr = null;
+
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      try {
+        // IMPORTANT: strengthen instruction: do not even mention the word "pork"
+        const prompt =
+          `Generate a Muslim-friendly daily menu for date ${dateISO}. ` +
+          `Hard rules: NEVER include pork or alcohol ingredients. ` +
+          `Also: DO NOT mention the word "pork" anywhere in the output (not even "pork-free"). ` +
+          `English only. Output the menu.`;
+
+        // If your code uses tool-output:
+        // menuObj = await callClaudeMenuWithTool(dateISO);
+        // If your code uses text prompt:
+        menuObj = await callClaudeJSON(prompt);
+
+        // Safety scan
+        assertNoForbidden(JSON.stringify(menuObj));
+
+        // Passed
+        lastErr = null;
+        break;
+      } catch (e) {
+        lastErr = e;
+        menuObj = null;
+      }
+    }
+
+    if (!menuObj) {
+      throw new Error(`Menu generation failed after retries: ${lastErr?.message || lastErr}`);
+    }
+
+    const { error } = await supabase
+      .from("daily_menus")
+      .upsert(
+        {
+          menu_date: dateISO,
+          status: "draft",
+          language: "en",
+          menu_json: menuObj,
+        },
+        { onConflict: "menu_date" }
+      );
+
+    if (error) throw error;
+
+    return res.json({ ok: true, menu_date: dateISO, status: "draft" });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ ok: false, error: e.message || String(e) });
+  }
+});
+
+        // Passed
+        lastErr = null;
+        break;
+      } catch (e) {
+        lastErr = e;
+        menuObj = null;
+      }
+    }
+
+    if (!menuObj) {
+      throw new Error(`Menu generation failed after retries: ${lastErr?.message || lastErr}`);
+    }
+
+    const { error } = await supabase
+      .from("daily_menus")
+      .upsert(
+        {
+          menu_date: dateISO,
+          status: "draft",
+          language: "en",
+          menu_json: menuObj,
+        },
+        { onConflict: "menu_date" }
+      );
+
+    if (error) throw error;
+
+    return res.json({ ok: true, menu_date: dateISO, status: "draft" });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ ok: false, error: e.message || String(e) });
+  }
+});;
 
     const { error } = await supabase
       .from("daily_menus")
