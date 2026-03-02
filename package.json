@@ -1,7 +1,7 @@
 {
   "name": "dailymenu-worker",
-  "version": "1.0.0",
-  "description": "",
+  "version": "1.1.0",
+  "description": "DailyMenu Worker — generates daily menus with Claude + Flux images",
   "main": "index.js",
   "scripts": {
     "dev": "nodemon index.js",
@@ -15,8 +15,7 @@
     "@supabase/supabase-js": "^2.98.0",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
-    "jsonrepair": "^3.13.2",
-    "tmp": "^0.2.5"
+    "node-cron": "^3.0.3"
   },
   "devDependencies": {
     "nodemon": "^3.1.14"

@@ -1,84 +1,83 @@
-// --- Node deps ---
+// ============================================================
+// DailyMenu Worker — V1 (Images + Music, No Video)
+// ============================================================
 const fs = require("fs");
 const path = require("path");
-const { execFile } = require("child_process");
-const tmp = require("tmp");
 
-// --- App deps ---
 require("dotenv").config();
 const express = require("express");
+const cron = require("node-cron");
 const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 app.use(express.json());
 
-// --- ENV ---
+// ---- ENV ----
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-const LUMA_API_KEY = process.env.LUMA_API_KEY;
-
 const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY;
-const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-opus-4-6";
+const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-sonnet-4-5-20250929";
+const REPLICATE_API_TOKEN = process.env.REPLICATE_API_TOKEN;
+const WORKER_API_KEY = process.env.WORKER_API_KEY; // simple auth
+const CRON_SCHEDULE = process.env.CRON_SCHEDULE || "0 5 * * *"; // 5:00 AM daily
 
-if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-  throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
-}
-if (!LUMA_API_KEY) {
-  throw new Error("Missing LUMA_API_KEY");
+// ---- Validate required env ----
+const required = { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, CLAUDE_API_KEY, REPLICATE_API_TOKEN };
+for (const [key, val] of Object.entries(required)) {
+  if (!val) throw new Error(`Missing required env var: ${key}`);
 }
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-// ----------------------------------------------------
+// ============================================================
+// Auth middleware
+// ============================================================
+function authMiddleware(req, res, next) {
+  // Skip auth for health check
+  if (req.path === "/") return next();
+  // Skip auth for cron (internal calls)
+  if (req.headers["x-cron-internal"] === "true" && req.ip === "127.0.0.1") return next();
+
+  if (!WORKER_API_KEY) return next(); // no key set = no auth (dev mode)
+
+  const provided = req.headers["x-api-key"];
+  if (provided !== WORKER_API_KEY) {
+    return res.status(401).json({ ok: false, error: "Unauthorized" });
+  }
+  next();
+}
+app.use(authMiddleware);
+
+// ============================================================
 // Helpers
-// ----------------------------------------------------
+// ============================================================
+const FORBIDDEN = [
+  // pork
+  "pork", "bacon", "ham", "lard", "prosciutto", "pepperoni", "salami",
+  "pancetta", "domuz", "jambon", "pastırma domuz",
+  // alcohol
+  "wine", "beer", "vodka", "whiskey", "rum", "brandy", "gin",
+  "champagne", "alcohol", "şarap", "bira", "rakı", "viski",
+];
+
 function assertNoForbidden(text) {
   const t = (text || "").toLowerCase();
-  const forbidden = [
-    // pork family
-    "pork",
-    "bacon",
-    "ham",
-    "lard",
-    "prosciutto",
-    "pepperoni",
-    "salami",
-    "pancetta",
-    "domuz",
-    "jambon",
-    // alcohol
-    "wine",
-    "beer",
-    "vodka",
-    "whiskey",
-    "rum",
-    "brandy",
-    "gin",
-    "champagne",
-    "alcohol",
-  ];
-  const hit = forbidden.find((w) => t.includes(w));
+  const hit = FORBIDDEN.find((w) => t.includes(w));
   if (hit) throw new Error(`Forbidden item detected: ${hit}`);
 }
 
-function runFfmpeg(args) {
-  return new Promise((resolve, reject) => {
-    execFile(path.join(__dirname, "bin", "ffmpeg"), args, (err, stdout, stderr) => {
-      if (err) return reject(new Error(`ffmpeg failed: ${stderr || err.message}`));
-      resolve({ stdout, stderr });
-    });
-  });
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
-function getStatusToUse(req) {
-  return req.body?.status || "draft"; // default draft (safe)
+function todayISO() {
+  return new Date().toISOString().slice(0, 10);
 }
 
-// ---- Claude tool-output menu generation
-async function callClaudeMenuWithTool(dateISO) {
-  if (!CLAUDE_API_KEY) throw new Error("Missing CLAUDE_API_KEY in Render env vars");
-
+// ============================================================
+// Claude Menu Generation (EN + TR bilingual)
+// ============================================================
+async function callClaudeMenu(dateISO) {
   const resp = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -88,18 +87,18 @@ async function callClaudeMenuWithTool(dateISO) {
     },
     body: JSON.stringify({
       model: CLAUDE_MODEL,
-      max_tokens: 2500,
+      max_tokens: 4000,
       temperature: 0.7,
       tools: [
         {
           name: "submit_menu",
-          description: "Submit a Muslim-friendly daily menu in strict structured JSON.",
+          description:
+            "Submit a Muslim-friendly daily menu with both English and Turkish translations.",
           input_schema: {
             type: "object",
             additionalProperties: false,
             properties: {
               date: { type: "string" },
-              language: { type: "string", enum: ["en"] },
               rules_confirmed: {
                 type: "object",
                 additionalProperties: false,
@@ -110,6 +109,7 @@ async function callClaudeMenuWithTool(dateISO) {
                 required: ["no_pork", "no_alcohol"],
               },
               allergen_notes_en: { type: "string" },
+              allergen_notes_tr: { type: "string" },
               menu: {
                 type: "object",
                 additionalProperties: false,
@@ -122,38 +122,41 @@ async function callClaudeMenuWithTool(dateISO) {
                 required: ["soup", "main", "salad", "side"],
               },
             },
-            required: ["date", "language", "rules_confirmed", "allergen_notes_en", "menu"],
+            required: ["date", "rules_confirmed", "allergen_notes_en", "allergen_notes_tr", "menu"],
             $defs: {
               ingredient: {
                 type: "object",
                 additionalProperties: false,
                 properties: {
-                  name: { type: "string" },
+                  name_en: { type: "string" },
+                  name_tr: { type: "string" },
                   quantity: { type: "number" },
                   unit: { type: "string" },
                 },
-                required: ["name", "quantity", "unit"],
+                required: ["name_en", "name_tr", "quantity", "unit"],
               },
               dish: {
                 type: "object",
                 additionalProperties: false,
                 properties: {
                   title_en: { type: "string" },
+                  title_tr: { type: "string" },
                   description_en: { type: "string" },
-                  ingredients: { type: "array", items: { $ref: "#/$defs/ingredient" }, minItems: 3 },
-                  steps: { type: "array", items: { type: "string" }, minItems: 6 },
+                  description_tr: { type: "string" },
+                  ingredients: {
+                    type: "array",
+                    items: { $ref: "#/$defs/ingredient" },
+                    minItems: 3,
+                  },
                   serving_size_g: { type: "number" },
                   diet_tags: { type: "array", items: { type: "string" } },
-                  image_prompts: { type: "array", items: { type: "string" }, minItems: 1 },
+                  image_prompt: { type: "string" },
                 },
                 required: [
-                  "title_en",
-                  "description_en",
+                  "title_en", "title_tr",
+                  "description_en", "description_tr",
                   "ingredients",
-                  "steps",
-                  "serving_size_g",
-                  "diet_tags",
-                  "image_prompts",
+                  "serving_size_g", "diet_tags", "image_prompt",
                 ],
               },
             },
@@ -165,9 +168,16 @@ async function callClaudeMenuWithTool(dateISO) {
         {
           role: "user",
           content:
-            `Generate a Muslim-friendly daily menu for date ${dateISO}. ` +
-            `Hard rules: no pork, no alcohol ingredients, English only. ` +
-            `Also: do NOT mention the word "pork" anywhere (not even "pork-free"). ` +
+            `Generate a delicious Muslim-friendly daily menu for date ${dateISO}.\n\n` +
+            `HARD RULES:\n` +
+            `- Absolutely no pork or pork products (no bacon, ham, lard, prosciutto, pepperoni, salami, pancetta)\n` +
+            `- Absolutely no alcohol or alcohol-based ingredients\n` +
+            `- Do NOT mention the word "pork" anywhere, not even as "pork-free"\n\n` +
+            `REQUIREMENTS:\n` +
+            `- Provide both English and Turkish names/descriptions for everything\n` +
+            `- Each dish needs a detailed image_prompt for AI food photography (describe the dish plated beautifully, top-down or 45-degree angle, natural lighting, restaurant quality)\n` +
+            `- Make the menu varied and interesting — use different cuisines (Turkish, Mediterranean, Middle Eastern, Asian, etc.)\n` +
+            `- Include seasonal ingredients when possible\n\n` +
             `Return by calling the submit_menu tool.`,
         },
       ],
@@ -175,436 +185,387 @@ async function callClaudeMenuWithTool(dateISO) {
   });
 
   const raw = await resp.text();
-  if (!resp.ok) throw new Error(`Claude API failed: ${resp.status} ${raw}`);
+  if (!resp.ok) throw new Error(`Claude API ${resp.status}: ${raw}`);
 
   const json = JSON.parse(raw);
-  const toolUse = (json.content || []).find((c) => c.type === "tool_use" && c.name === "submit_menu");
-  if (!toolUse || !toolUse.input) throw new Error("Claude did not return submit_menu tool output");
+  const toolUse = (json.content || []).find(
+    (c) => c.type === "tool_use" && c.name === "submit_menu"
+  );
+  if (!toolUse?.input) throw new Error("Claude did not return submit_menu tool output");
 
-  return toolUse.input; // structured object
+  return toolUse.input;
 }
 
-// ---- Luma
-async function createLumaVideo(prompt) {
-  const resp = await fetch("https://api.lumalabs.ai/dream-machine/v1/generations", {
+// ============================================================
+// Replicate Flux Image Generation
+// ============================================================
+async function generateImage(prompt) {
+  // Start prediction
+  const createResp = await fetch("https://api.replicate.com/v1/predictions", {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${LUMA_API_KEY}`,
+      Authorization: `Bearer ${REPLICATE_API_TOKEN}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ prompt, model: "ray-2" }),
+    body: JSON.stringify({
+      // Flux Schnell — fast + cheap (~$0.003/image)
+      version: "black-forest-labs/flux-schnell",
+      input: {
+        prompt: prompt,
+        num_outputs: 1,
+        aspect_ratio: "4:3",
+        output_format: "webp",
+        output_quality: 90,
+      },
+    }),
   });
 
-  const text = await resp.text();
-  if (!resp.ok) throw new Error(`Luma create failed: ${resp.status} ${text}`);
-  return JSON.parse(text);
+  const createText = await createResp.text();
+  if (!createResp.ok) throw new Error(`Replicate create failed: ${createResp.status} ${createText}`);
+
+  let prediction = JSON.parse(createText);
+
+  // Poll until complete (Flux Schnell is usually <5s)
+  let attempts = 0;
+  while (prediction.status !== "succeeded" && prediction.status !== "failed") {
+    if (attempts++ > 60) throw new Error("Image generation timed out");
+    await sleep(1000);
+
+    const pollResp = await fetch(prediction.urls.get, {
+      headers: { Authorization: `Bearer ${REPLICATE_API_TOKEN}` },
+    });
+    prediction = await pollResp.json();
+  }
+
+  if (prediction.status === "failed") {
+    throw new Error(`Image generation failed: ${prediction.error}`);
+  }
+
+  // Flux returns array of URLs
+  const imageUrl = Array.isArray(prediction.output)
+    ? prediction.output[0]
+    : prediction.output;
+
+  if (!imageUrl) throw new Error("No image URL in prediction output");
+  return imageUrl;
 }
 
-async function getLumaJob(jobId) {
-  const resp = await fetch(`https://api.lumalabs.ai/dream-machine/v1/generations/${jobId}`, {
-    method: "GET",
-    headers: {
-      Authorization: `Bearer ${LUMA_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-  });
+async function generateAndUploadImage(prompt, menuDate, dishName) {
+  console.log(`  📸 Generating image for ${dishName}...`);
 
-  const text = await resp.text();
-  if (!resp.ok) throw new Error(`Luma get failed: ${resp.status} ${text}`);
-  return JSON.parse(text);
+  // Generate with Replicate
+  const tempUrl = await generateImage(prompt);
+
+  // Download the image
+  const imgResp = await fetch(tempUrl);
+  if (!imgResp.ok) throw new Error(`Failed to download image: ${imgResp.status}`);
+  const buffer = new Uint8Array(await imgResp.arrayBuffer());
+
+  // Upload to Supabase Storage
+  const storagePath = `${menuDate}/${dishName}/photo.webp`;
+  const { error: upErr } = await supabase.storage
+    .from("menu-media")
+    .upload(storagePath, buffer, {
+      contentType: "image/webp",
+      upsert: true,
+    });
+
+  if (upErr) throw new Error(`Storage upload failed: ${upErr.message}`);
+
+  // Get public URL
+  const { data: pub } = supabase.storage.from("menu-media").getPublicUrl(storagePath);
+  console.log(`  ✅ ${dishName} image uploaded`);
+  return pub.publicUrl;
 }
 
-// ----------------------------------------------------
+// ============================================================
 // Routes
-// ----------------------------------------------------
-app.get("/", (req, res) => res.json({ ok: true, service: "dailymenu-worker" }));
+// ============================================================
 
-// Generate menu (draft)
+// Health check
+app.get("/", (req, res) =>
+  res.json({ ok: true, service: "dailymenu-worker", version: "1.0.0" })
+);
+
+// --- Step 1: Generate menu (Claude) ---
 app.post("/menu/generate", async (req, res) => {
   try {
-    const dateISO = req.body?.date || new Date().toISOString().slice(0, 10);
+    const dateISO = req.body?.date || todayISO();
+    console.log(`\n🍽️  Generating menu for ${dateISO}...`);
 
     let menuObj = null;
     let lastErr = null;
 
-    for (let attempt = 1; attempt <= 5; attempt++) {
+    for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        menuObj = await callClaudeMenuWithTool(dateISO);
+        console.log(`  Attempt ${attempt}/3...`);
+        menuObj = await callClaudeMenu(dateISO);
 
-        // Validate structure exists
         const menu = menuObj?.menu;
         if (!menu?.soup || !menu?.main || !menu?.salad || !menu?.side) {
-          throw new Error("Claude output missing menu.soup/main/salad/side");
+          throw new Error("Missing menu.soup/main/salad/side");
         }
 
-        // Safety scan
+        // Safety check
         assertNoForbidden(JSON.stringify(menuObj));
-
         lastErr = null;
         break;
       } catch (e) {
         lastErr = e;
         menuObj = null;
+        console.warn(`  ⚠️ Attempt ${attempt} failed: ${e.message}`);
       }
     }
 
     if (!menuObj) {
-      throw new Error(`Menu generation failed after retries: ${lastErr?.message || lastErr}`);
+      throw new Error(`Menu generation failed: ${lastErr?.message}`);
     }
 
-    const { error } = await supabase
-      .from("daily_menus")
-      .upsert(
-        {
-          menu_date: dateISO,
-          status: "draft",
-          language: "en",
-          menu_json: menuObj,
-        },
-        { onConflict: "menu_date" }
-      );
+    console.log(`  ✅ Menu generated: ${menuObj.menu.main.title_en}`);
+
+    // Upsert into Supabase
+    const { error } = await supabase.from("daily_menus").upsert(
+      {
+        menu_date: dateISO,
+        status: "draft",
+        language: "en+tr",
+        menu_json: menuObj,
+      },
+      { onConflict: "menu_date" }
+    );
 
     if (error) throw error;
-
-    return res.json({ ok: true, menu_date: dateISO, status: "draft" });
+    return res.json({ ok: true, menu_date: dateISO, status: "draft", menu: menuObj });
   } catch (e) {
-    console.error(e);
-    return res.status(500).json({ ok: false, error: e.message || String(e) });
+    console.error("❌ /menu/generate error:", e);
+    return res.status(500).json({ ok: false, error: e.message });
   }
 });
-// Publish: draft -> published (same date)
+
+// --- Step 2: Generate images (Replicate Flux) ---
+app.post("/images/generate", async (req, res) => {
+  try {
+    const dateISO = req.body?.date || todayISO();
+    console.log(`\n📸 Generating images for ${dateISO}...`);
+
+    // Get the draft menu
+    const { data: menuRow, error } = await supabase
+      .from("daily_menus")
+      .select("id, menu_date, menu_json, media_json")
+      .eq("menu_date", dateISO)
+      .maybeSingle();
+
+    if (error) throw error;
+    if (!menuRow) return res.status(404).json({ ok: false, error: "No menu found for this date" });
+
+    const menu = menuRow.menu_json?.menu;
+    if (!menu) return res.status(400).json({ ok: false, error: "menu_json.menu is missing" });
+
+    const mediaJson = menuRow.media_json || {};
+    const results = {};
+
+    for (const dish of ["soup", "main", "salad", "side"]) {
+      try {
+        const prompt = menu[dish]?.image_prompt;
+        if (!prompt) {
+          results[dish] = { skipped: true, reason: "no image_prompt" };
+          continue;
+        }
+
+        const publicUrl = await generateAndUploadImage(prompt, dateISO, dish);
+        mediaJson[dish] = mediaJson[dish] || {};
+        mediaJson[dish].images = [publicUrl];
+        results[dish] = { ok: true, url: publicUrl };
+      } catch (e) {
+        console.error(`  ❌ ${dish} image failed:`, e.message);
+        results[dish] = { error: e.message };
+      }
+    }
+
+    // Update media_json
+    const { error: saveErr } = await supabase
+      .from("daily_menus")
+      .update({ media_json: mediaJson })
+      .eq("id", menuRow.id);
+
+    if (saveErr) throw saveErr;
+
+    console.log(`  ✅ Images done for ${dateISO}`);
+    return res.json({ ok: true, menu_date: dateISO, results });
+  } catch (e) {
+    console.error("❌ /images/generate error:", e);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// --- Step 3: Publish menu ---
 app.post("/menu/publish", async (req, res) => {
   try {
-    const dateISO = req.body?.date || new Date().toISOString().slice(0, 10);
+    const dateISO = req.body?.date || todayISO();
 
     const { data, error } = await supabase
       .from("daily_menus")
       .update({ status: "published" })
       .eq("menu_date", dateISO)
       .eq("status", "draft")
-      .select("menu_date,status")
+      .select("menu_date, status")
       .maybeSingle();
 
     if (error) throw error;
-    if (!data) return res.status(404).json({ ok: false, error: "No draft menu found for that date." });
+    if (!data) return res.status(404).json({ ok: false, error: "No draft menu for that date" });
 
+    console.log(`  ✅ Published menu for ${dateISO}`);
     return res.json({ ok: true, menu_date: data.menu_date, status: data.status });
   } catch (e) {
-    console.error(e);
-    return res.status(500).json({ ok: false, error: e.message || String(e) });
+    console.error("❌ /menu/publish error:", e);
+    return res.status(500).json({ ok: false, error: e.message });
   }
 });
 
-// Start Luma jobs (draft or published)
-app.post("/jobs/start", async (req, res) => {
+// --- Full Pipeline (generate → images → publish) ---
+app.post("/pipeline/run", async (req, res) => {
   try {
-    const { date } = req.body || {};
-    const statusToUse = getStatusToUse(req);
+    const dateISO = req.body?.date || todayISO();
+    console.log(`\n🚀 Running full pipeline for ${dateISO}...`);
 
-    let query = supabase
-      .from("daily_menus")
-      .select("id, menu_date, status, menu_json")
-      .eq("status", statusToUse)
-      .order("menu_date", { ascending: false })
-      .limit(1);
+    // Step 1: Generate menu
+    console.log("  Step 1/3: Generating menu...");
+    let menuObj = null;
+    let lastErr = null;
 
-    if (date) query = query.eq("menu_date", date);
-
-    const { data: menuRow, error } = await query.maybeSingle();
-    if (error) throw error;
-    if (!menuRow) return res.status(404).json({ ok: false, error: `No ${statusToUse} menu found.` });
-
-    // ✅ Support both shapes:
-    // - menu_json = { date, ..., menu: {soup,...} }
-    // - menu_json = {soup,...} (rare)
-    const root = menuRow.menu_json || {};
-    const menu = root.menu || root;
-
-    if (!menu?.soup || !menu?.main || !menu?.salad || !menu?.side) {
-      return res.status(400).json({ ok: false, error: "Menu structure missing soup/main/salad/side" });
-    }
-
-    const prompts = {
-      soup: `Hands-only cooking video: ${menu.soup.title_en}. Close-up chopping and stirring. No faces. No narration.`,
-      main: `Hands-only cooking video: ${menu.main.title_en}. Mixing, shaping, cooking, plating. No faces. No narration.`,
-      salad: `Hands-only cooking video: ${menu.salad.title_en}. Chopping vegetables, mixing bowl, plating. No faces. No narration.`,
-      side: `Hands-only cooking video: ${menu.side.title_en}. Rinsing, simmering, fluffing, serving. No faces. No narration.`,
-    };
-
-    const jobs = {
-      soup: await createLumaVideo(prompts.soup),
-      main: await createLumaVideo(prompts.main),
-      salad: await createLumaVideo(prompts.salad),
-      side: await createLumaVideo(prompts.side),
-    };
-
-    const { error: upErr } = await supabase
-      .from("daily_menus")
-      .update({
-        job_status: "generating",
-        luma_jobs: {
-          created_at: new Date().toISOString(),
-          provider: "luma",
-          prompts,
-          jobs,
-        },
-      })
-      .eq("id", menuRow.id);
-
-    if (upErr) throw upErr;
-
-    return res.json({ ok: true, status: statusToUse, menu_date: menuRow.menu_date, jobs });
-  } catch (e) {
-    console.error(e);
-    return res.status(500).json({ ok: false, error: e.message || String(e) });
-  }
-});
-
-// Poll Luma jobs
-app.post("/jobs/poll", async (req, res) => {
-  try {
-    const { date } = req.body || {};
-    const statusToUse = getStatusToUse(req);
-
-    let query = supabase
-      .from("daily_menus")
-      .select("id, menu_date, status, luma_jobs")
-      .eq("status", statusToUse)
-      .order("menu_date", { ascending: false })
-      .limit(1);
-
-    if (date) query = query.eq("menu_date", date);
-
-    const { data: menuRow, error } = await query.maybeSingle();
-    if (error) throw error;
-    if (!menuRow) return res.status(404).json({ ok: false, error: `No ${statusToUse} menu found.` });
-
-    const jobs = menuRow.luma_jobs?.jobs;
-    if (!jobs) return res.status(400).json({ ok: false, error: "luma_jobs.jobs missing. Run /jobs/start first." });
-
-    const result = {};
-    for (const dish of ["soup", "main", "salad", "side"]) {
-      const jobId = jobs[dish]?.id;
-      if (!jobId) {
-        result[dish] = { state: "missing_job_id" };
-        continue;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        menuObj = await callClaudeMenu(dateISO);
+        const menu = menuObj?.menu;
+        if (!menu?.soup || !menu?.main || !menu?.salad || !menu?.side) {
+          throw new Error("Missing dishes");
+        }
+        assertNoForbidden(JSON.stringify(menuObj));
+        break;
+      } catch (e) {
+        lastErr = e;
+        menuObj = null;
       }
-      result[dish] = await getLumaJob(jobId);
     }
+    if (!menuObj) throw new Error(`Menu generation failed: ${lastErr?.message}`);
 
-    const { error: upErr } = await supabase
-      .from("daily_menus")
-      .update({
-        luma_jobs: {
-          ...(menuRow.luma_jobs || {}),
-          last_polled_at: new Date().toISOString(),
-          last_poll_result: result,
-        },
-      })
-      .eq("id", menuRow.id);
+    // Save draft
+    const { error: upsertErr } = await supabase.from("daily_menus").upsert(
+      {
+        menu_date: dateISO,
+        status: "draft",
+        language: "en+tr",
+        menu_json: menuObj,
+      },
+      { onConflict: "menu_date" }
+    );
+    if (upsertErr) throw upsertErr;
+    console.log(`  ✅ Menu saved: ${menuObj.menu.main.title_en}`);
 
-    if (upErr) throw upErr;
-
-    return res.json({ ok: true, status: statusToUse, menu_date: menuRow.menu_date, result });
-  } catch (e) {
-    console.error(e);
-    return res.status(500).json({ ok: false, error: e.message || String(e) });
-  }
-});
-
-// Attach finished Luma videos to Supabase Storage + update media_json
-app.post("/jobs/attach-videos", async (req, res) => {
-  try {
-    const { date } = req.body || {};
-    const statusToUse = getStatusToUse(req);
-
-    let query = supabase
-      .from("daily_menus")
-      .select("id, menu_date, status, luma_jobs, media_json")
-      .eq("status", statusToUse)
-      .order("menu_date", { ascending: false })
-      .limit(1);
-
-    if (date) query = query.eq("menu_date", date);
-
-    const { data: menuRow, error } = await query.maybeSingle();
-    if (error) throw error;
-    if (!menuRow) return res.status(404).json({ ok: false, error: `No ${statusToUse} menu found.` });
-
-    const poll = menuRow.luma_jobs?.last_poll_result;
-    if (!poll) return res.status(400).json({ ok: false, error: "No last_poll_result found. Run /jobs/poll first." });
-
-    const menuDate = menuRow.menu_date;
-    const bucket = "menu-media";
-    const updatedMedia = menuRow.media_json || {};
-    const uploaded = {};
+    // Step 2: Generate images
+    console.log("  Step 2/3: Generating images...");
+    const menu = menuObj.menu;
+    const mediaJson = {};
+    const imageResults = {};
 
     for (const dish of ["soup", "main", "salad", "side"]) {
-      const info = poll[dish];
-      const state = info?.state;
-      const videoUrl = info?.assets?.video;
-
-      if (state !== "completed" || !videoUrl) {
-        uploaded[dish] = { skipped: true, state, videoUrl: videoUrl || null };
-        continue;
+      try {
+        const prompt = menu[dish]?.image_prompt;
+        if (!prompt) {
+          imageResults[dish] = { skipped: true };
+          continue;
+        }
+        const publicUrl = await generateAndUploadImage(prompt, dateISO, dish);
+        mediaJson[dish] = { images: [publicUrl] };
+        imageResults[dish] = { ok: true, url: publicUrl };
+      } catch (e) {
+        console.error(`  ❌ ${dish} image failed:`, e.message);
+        imageResults[dish] = { error: e.message };
       }
+    }
 
-      const r = await fetch(videoUrl);
-      if (!r.ok) {
-        uploaded[dish] = { error: `Download failed ${r.status}` };
-        continue;
-      }
+    // Update media_json
+    const { error: mediaErr } = await supabase
+      .from("daily_menus")
+      .update({ media_json: mediaJson })
+      .eq("menu_date", dateISO);
+    if (mediaErr) throw mediaErr;
 
-      const bytes = new Uint8Array(await r.arrayBuffer());
-      const storagePath = `${menuDate}/${dish}/final.mp4`;
+    // Step 3: Publish
+    console.log("  Step 3/3: Publishing...");
+    const { error: pubErr } = await supabase
+      .from("daily_menus")
+      .update({ status: "published" })
+      .eq("menu_date", dateISO);
+    if (pubErr) throw pubErr;
 
-      const { error: upErr } = await supabase.storage.from(bucket).upload(storagePath, bytes, {
-        contentType: "video/mp4",
-        upsert: true,
+    console.log(`\n🎉 Pipeline complete for ${dateISO}!\n`);
+    return res.json({
+      ok: true,
+      menu_date: dateISO,
+      status: "published",
+      main_dish: menuObj.menu.main.title_en,
+      images: imageResults,
+    });
+  } catch (e) {
+    console.error("❌ /pipeline/run error:", e);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// --- Get current menu (for debugging) ---
+app.get("/menu/current", async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("daily_menus")
+      .select("*")
+      .eq("status", "published")
+      .order("menu_date", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (error) throw error;
+    return res.json({ ok: true, data });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ============================================================
+// Cron Job — Auto-generate daily menu
+// ============================================================
+if (process.env.ENABLE_CRON !== "false") {
+  cron.schedule(CRON_SCHEDULE, async () => {
+    const dateISO = todayISO();
+    console.log(`\n⏰ CRON: Starting daily pipeline for ${dateISO}...`);
+
+    try {
+      const resp = await fetch(`http://127.0.0.1:${port}/pipeline/run`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-cron-internal": "true",
+        },
+        body: JSON.stringify({ date: dateISO }),
       });
 
-      if (upErr) {
-        uploaded[dish] = { error: `Upload failed: ${upErr.message}` };
-        continue;
-      }
-
-      const { data: pub } = supabase.storage.from(bucket).getPublicUrl(storagePath);
-      const publicUrl = pub.publicUrl;
-
-      updatedMedia[dish] = updatedMedia[dish] || {};
-      updatedMedia[dish].video = publicUrl;
-
-      uploaded[dish] = { ok: true, publicUrl };
+      const result = await resp.json();
+      console.log("⏰ CRON result:", JSON.stringify(result, null, 2));
+    } catch (e) {
+      console.error("⏰ CRON failed:", e.message);
     }
+  });
 
-    const { error: saveErr } = await supabase
-      .from("daily_menus")
-      .update({ media_json: updatedMedia })
-      .eq("id", menuRow.id);
+  console.log(`⏰ Cron scheduled: "${CRON_SCHEDULE}"`);
+}
 
-    if (saveErr) throw saveErr;
-
-    return res.json({ ok: true, status: statusToUse, menu_date: menuDate, uploaded });
-  } catch (e) {
-    console.error(e);
-    return res.status(500).json({ ok: false, error: e.message || String(e) });
-  }
-});
-
-// Bake music into MP4 and update media_json videos to final_music.mp4
-app.post("/jobs/mix-music", async (req, res) => {
-  try {
-    const { date, lang } = req.body || {};
-    const useLang = lang || "tr";
-    const statusToUse = getStatusToUse(req);
-
-    let query = supabase
-      .from("daily_menus")
-      .select("id, menu_date, status, media_json, music_json")
-      .eq("status", statusToUse)
-      .order("menu_date", { ascending: false })
-      .limit(1);
-
-    if (date) query = query.eq("menu_date", date);
-
-    const { data: menuRow, error } = await query.maybeSingle();
-    if (error) throw error;
-    if (!menuRow) return res.status(404).json({ ok: false, error: `No ${statusToUse} menu found.` });
-
-    const menuDate = menuRow.menu_date;
-    const media = menuRow.media_json || {};
-    const musicUrl = menuRow.music_json?.[useLang];
-    if (!musicUrl) return res.status(400).json({ ok: false, error: `music_json.${useLang} missing` });
-
-    const bucket = "menu-media";
-    const results = {};
-
-    for (const dish of ["soup", "main", "salad", "side"]) {
-      const videoUrl = media?.[dish]?.video;
-      if (!videoUrl) {
-        results[dish] = { skipped: true, reason: "no videoUrl in media_json" };
-        continue;
-      }
-
-      const tmpDir = tmp.dirSync({ unsafeCleanup: true });
-      const inVideo = path.join(tmpDir.name, "in.mp4");
-      const inMusic = path.join(tmpDir.name, "music.mp3");
-      const outVideo = path.join(tmpDir.name, "out.mp4");
-
-      const vr = await fetch(videoUrl);
-      if (!vr.ok) {
-        results[dish] = { error: `Video download failed ${vr.status}` };
-        tmpDir.removeCallback();
-        continue;
-      }
-      fs.writeFileSync(inVideo, Buffer.from(await vr.arrayBuffer()));
-
-      const mr = await fetch(musicUrl);
-      if (!mr.ok) {
-        results[dish] = { error: `Music download failed ${mr.status}` };
-        tmpDir.removeCallback();
-        continue;
-      }
-      fs.writeFileSync(inMusic, Buffer.from(await mr.arrayBuffer()));
-
-      const ffArgs = [
-        "-y",
-        "-i",
-        inVideo,
-        "-stream_loop",
-        "-1",
-        "-i",
-        inMusic,
-        "-c:v",
-        "copy",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "192k",
-        "-shortest",
-        outVideo,
-      ];
-
-      await runFfmpeg(ffArgs);
-
-      const outBytes = fs.readFileSync(outVideo);
-      const outPath = `${menuDate}/${dish}/final_music.mp4`;
-
-      const { error: upErr } = await supabase.storage.from(bucket).upload(outPath, outBytes, {
-        contentType: "video/mp4",
-        upsert: true,
-      });
-
-      if (upErr) {
-        results[dish] = { error: `Upload failed: ${upErr.message}` };
-        tmpDir.removeCallback();
-        continue;
-      }
-
-      const { data: pub } = supabase.storage.from(bucket).getPublicUrl(outPath);
-      const publicUrl = pub.publicUrl;
-
-      media[dish] = media[dish] || {};
-      media[dish].video = publicUrl;
-
-      results[dish] = { ok: true, publicUrl };
-      tmpDir.removeCallback();
-    }
-
-    const { error: saveErr } = await supabase
-      .from("daily_menus")
-      .update({ media_json: media })
-      .eq("id", menuRow.id);
-
-    if (saveErr) throw saveErr;
-
-    return res.json({ ok: true, status: statusToUse, menu_date: menuDate, lang: useLang, results });
-  } catch (e) {
-    console.error(e);
-    return res.status(500).json({ ok: false, error: e.message || String(e) });
-  }
-});
-
-// ----------------------------------------------------
+// ============================================================
+// Start
+// ============================================================
 const port = process.env.PORT || 3001;
-app.listen(port, "0.0.0.0", () => console.log(`Worker listening on ${port}`));
+app.listen(port, "0.0.0.0", () => {
+  console.log(`\n🚀 Worker listening on port ${port}`);
+  console.log(`   Model: ${CLAUDE_MODEL}`);
+  console.log(`   Cron: ${CRON_SCHEDULE}`);
+  console.log(`   Auth: ${WORKER_API_KEY ? "enabled" : "disabled (set WORKER_API_KEY)"}\n`);
+});
