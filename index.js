@@ -389,9 +389,14 @@ app.post("/images/generate", async (req, res) => {
         mediaJson[dish] = mediaJson[dish] || {};
         mediaJson[dish].images = [publicUrl];
         results[dish] = { ok: true, url: publicUrl };
+
+        // Wait between requests to avoid Replicate rate limits
+        await sleep(12000);
       } catch (e) {
         console.error(`  ❌ ${dish} image failed:`, e.message);
         results[dish] = { error: e.message };
+        // Wait before retrying next dish
+        await sleep(12000);
       }
     }
 
@@ -491,9 +496,13 @@ app.post("/pipeline/run", async (req, res) => {
         const publicUrl = await generateAndUploadImage(prompt, dateISO, dish);
         mediaJson[dish] = { images: [publicUrl] };
         imageResults[dish] = { ok: true, url: publicUrl };
+
+        // Wait between requests to avoid Replicate rate limits
+        await sleep(12000);
       } catch (e) {
         console.error(`  ❌ ${dish} image failed:`, e.message);
         imageResults[dish] = { error: e.message };
+        await sleep(12000);
       }
     }
 
