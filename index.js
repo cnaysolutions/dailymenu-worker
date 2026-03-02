@@ -60,10 +60,24 @@ const FORBIDDEN = [
   "champagne", "alcohol", "şarap", "bira", "rakı", "viski",
 ];
 
-function assertNoForbidden(text) {
-  const t = (text || "").toLowerCase();
-  const hit = FORBIDDEN.find((w) => t.includes(w));
-  if (hit) throw new Error(`Forbidden item detected: ${hit}`);
+function assertNoForbidden(menuObj) {
+  // Only scan actual dish content (titles, descriptions, ingredients)
+  // NOT the rules_confirmed or allergen_notes which naturally mention "pork"
+  const menu = menuObj?.menu;
+  if (!menu) return;
+
+  for (const dish of ["soup", "main", "salad", "side"]) {
+    const d = menu[dish];
+    if (!d) continue;
+    const parts = [
+      d.title_en, d.title_tr,
+      d.description_en, d.description_tr,
+      ...(d.ingredients || []).map((i) => `${i.name_en} ${i.name_tr}`),
+    ];
+    const text = parts.join(" ").toLowerCase();
+    const hit = FORBIDDEN.find((w) => text.includes(w));
+    if (hit) throw new Error(`Forbidden item in ${dish}: ${hit}`);
+  }
 }
 
 function sleep(ms) {
@@ -306,8 +320,7 @@ app.post("/menu/generate", async (req, res) => {
           throw new Error("Missing menu.soup/main/salad/side");
         }
 
-        // Safety check
-        assertNoForbidden(JSON.stringify(menuObj));
+        assertNoForbidden(menuObj);
         lastErr = null;
         break;
       } catch (e) {
@@ -440,7 +453,7 @@ app.post("/pipeline/run", async (req, res) => {
         if (!menu?.soup || !menu?.main || !menu?.salad || !menu?.side) {
           throw new Error("Missing dishes");
         }
-        assertNoForbidden(JSON.stringify(menuObj));
+        assertNoForbidden(menuObj);
         break;
       } catch (e) {
         lastErr = e;
