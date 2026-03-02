@@ -162,6 +162,18 @@ async function callClaudeMenu(dateISO) {
                     items: { $ref: "#/$defs/ingredient" },
                     minItems: 3,
                   },
+                  steps_en: {
+                    type: "array",
+                    items: { type: "string" },
+                    minItems: 4,
+                    description: "Step-by-step cooking instructions in English, each step is one clear sentence",
+                  },
+                  steps_tr: {
+                    type: "array",
+                    items: { type: "string" },
+                    minItems: 4,
+                    description: "Step-by-step cooking instructions in Turkish, each step is one clear sentence",
+                  },
                   serving_size_g: { type: "number" },
                   diet_tags: { type: "array", items: { type: "string" } },
                   image_prompt: { type: "string" },
@@ -170,6 +182,7 @@ async function callClaudeMenu(dateISO) {
                   "title_en", "title_tr",
                   "description_en", "description_tr",
                   "ingredients",
+                  "steps_en", "steps_tr",
                   "serving_size_g", "diet_tags", "image_prompt",
                 ],
               },
@@ -189,6 +202,10 @@ async function callClaudeMenu(dateISO) {
             `- Do NOT mention the word "pork" anywhere, not even as "pork-free"\n\n` +
             `REQUIREMENTS:\n` +
             `- Provide both English and Turkish names/descriptions for everything\n` +
+            `- For each dish, provide detailed step-by-step cooking instructions in BOTH English (steps_en) and Turkish (steps_tr)\n` +
+            `- Steps should be written like a home cook explaining to a friend — warm, clear, practical\n` +
+            `- Each step should be one clear action (e.g. "Chop the onions finely and sauté in olive oil for 3 minutes")\n` +
+            `- Include cooking times, temperatures, and practical tips in the steps\n` +
             `- Each dish needs a detailed image_prompt for AI food photography (describe the dish plated beautifully, top-down or 45-degree angle, natural lighting, restaurant quality)\n` +
             `- Make the menu varied and interesting — use different cuisines (Turkish, Mediterranean, Middle Eastern, Asian, etc.)\n` +
             `- Include seasonal ingredients when possible\n\n` +
