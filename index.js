@@ -54,7 +54,7 @@ app.use(authMiddleware);
 const FORBIDDEN = [
   // pork
   "pork", "bacon", "ham", "lard", "prosciutto", "pepperoni", "salami",
-  "pancetta", "domuz", "jambon", "pastırma domuz",
+  "pancetta", "domuz", "jambon",
   // alcohol
   "wine", "beer", "vodka", "whiskey", "rum", "brandy", "gin",
   "champagne", "alcohol", "şarap", "bira", "rakı", "viski",
@@ -75,7 +75,8 @@ function assertNoForbidden(menuObj) {
       ...(d.ingredients || []).map((i) => `${i.name_en} ${i.name_tr}`),
     ];
     const text = parts.join(" ").toLowerCase();
-    const hit = FORBIDDEN.find((w) => text.includes(w));
+    // Use word boundary matching to avoid false positives (e.g. "drumstick" matching "rum")
+    const hit = FORBIDDEN.find((w) => new RegExp(`\\b${w}\\b`, "i").test(text));
     if (hit) throw new Error(`Forbidden item in ${dish}: ${hit}`);
   }
 }
