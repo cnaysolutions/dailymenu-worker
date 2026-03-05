@@ -18,13 +18,17 @@ const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY;
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-sonnet-4-5-20250929";
 const REPLICATE_API_TOKEN = process.env.REPLICATE_API_TOKEN;
+const SILICONFLOW_API_KEY = process.env.SILICONFLOW_API_KEY;
 const WORKER_API_KEY = process.env.WORKER_API_KEY; // simple auth
 const CRON_SCHEDULE = process.env.CRON_SCHEDULE || "0 5 * * *"; // 5:00 AM daily
 
 // ---- Validate required env ----
-const required = { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, CLAUDE_API_KEY, REPLICATE_API_TOKEN };
+const required = { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, CLAUDE_API_KEY };
 for (const [key, val] of Object.entries(required)) {
   if (!val) throw new Error(`Missing required env var: ${key}`);
+}
+if (!SILICONFLOW_API_KEY && !REPLICATE_API_TOKEN) {
+  throw new Error("Missing required env var: SILICONFLOW_API_KEY or REPLICATE_API_TOKEN");
 }
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
@@ -229,9 +233,43 @@ async function callClaudeMenu(dateISO) {
 }
 
 // ============================================================
-// Replicate Flux Image Generation
+// Image Generation (SiliconFlow preferred, Replicate fallback)
 // ============================================================
 async function generateImage(prompt) {
+  if (SILICONFLOW_API_KEY) {
+    return generateImageSiliconFlow(prompt);
+  }
+  return generateImageReplicate(prompt);
+}
+
+async function generateImageSiliconFlow(prompt) {
+  const resp = await fetch("https://api.siliconflow.cn/v1/images/generations", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${SILICONFLOW_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "black-forest-labs/FLUX.1-schnell",
+      prompt: prompt,
+      image_size: "1024x768",
+      batch_size: 1,
+    }),
+  });
+
+  const text = await resp.text();
+  if (!resp.ok) throw new Error(`SiliconFlow failed: ${resp.status} ${text}`);
+
+  const json = JSON.parse(text);
+  const images = json.images || json.data;
+  if (!images || !images.length) throw new Error("No images in SiliconFlow response");
+
+  const imageUrl = images[0].url;
+  if (!imageUrl) throw new Error("No image URL in SiliconFlow response");
+  return imageUrl;
+}
+
+async function generateImageReplicate(prompt) {
   // Start prediction
   const createResp = await fetch("https://api.replicate.com/v1/predictions", {
     method: "POST",
@@ -240,7 +278,6 @@ async function generateImage(prompt) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      // Flux Schnell — fast + cheap (~$0.003/image)
       version: "black-forest-labs/flux-schnell",
       input: {
         prompt: prompt,
@@ -257,12 +294,10 @@ async function generateImage(prompt) {
 
   let prediction = JSON.parse(createText);
 
-  // Poll until complete (Flux Schnell is usually <5s)
   let attempts = 0;
   while (prediction.status !== "succeeded" && prediction.status !== "failed") {
     if (attempts++ > 60) throw new Error("Image generation timed out");
     await sleep(1000);
-
     const pollResp = await fetch(prediction.urls.get, {
       headers: { Authorization: `Bearer ${REPLICATE_API_TOKEN}` },
     });
@@ -273,7 +308,6 @@ async function generateImage(prompt) {
     throw new Error(`Image generation failed: ${prediction.error}`);
   }
 
-  // Flux returns array of URLs
   const imageUrl = Array.isArray(prediction.output)
     ? prediction.output[0]
     : prediction.output;
@@ -285,7 +319,7 @@ async function generateImage(prompt) {
 async function generateAndUploadImage(prompt, menuDate, dishName) {
   console.log(`  📸 Generating image for ${dishName}...`);
 
-  // Generate with Replicate
+  // Generate with SiliconFlow (or Replicate fallback)
   const tempUrl = await generateImage(prompt);
 
   // Download the image
