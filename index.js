@@ -518,9 +518,21 @@ app.post("/pipeline/run", async (req, res) => {
         // Wait between requests to avoid Replicate rate limits
         await sleep(12000);
       } catch (e) {
-        console.error(`  ❌ ${dish} image failed:`, e.message);
-        imageResults[dish] = { error: e.message };
-        await sleep(12000);
+        console.error(`  ❌ ${dish} image failed (attempt 1):`, e.message);
+        // Retry once after longer delay
+        await sleep(20000);
+        try {
+          const prompt = menu[dish]?.image_prompt;
+          console.log(`  🔄 Retrying ${dish} image...`);
+          const publicUrl = await generateAndUploadImage(prompt, dateISO, dish);
+          mediaJson[dish] = { images: [publicUrl] };
+          imageResults[dish] = { ok: true, url: publicUrl };
+          await sleep(12000);
+        } catch (e2) {
+          console.error(`  ❌ ${dish} image failed (attempt 2):`, e2.message);
+          imageResults[dish] = { error: e2.message };
+          await sleep(12000);
+        }
       }
     }
 
