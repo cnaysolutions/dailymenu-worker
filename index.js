@@ -243,7 +243,7 @@ async function generateImage(prompt) {
 }
 
 async function generateImageSiliconFlow(prompt) {
-  const resp = await fetch("https://api.siliconflow.cn/v1/images/generations", {
+  const resp = await fetch("https://api.siliconflow.com/v1/images/generations", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${SILICONFLOW_API_KEY}`,
