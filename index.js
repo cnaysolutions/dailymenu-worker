@@ -94,9 +94,43 @@ function todayISO() {
 }
 
 // ============================================================
+// Fetch recent menus to prevent repetition
+// ============================================================
+async function getRecentDishNames(days = 7) {
+  try {
+    const { data, error } = await supabase
+      .from("daily_menus")
+      .select("menu_date, menu_json")
+      .order("menu_date", { ascending: false })
+      .limit(days);
+
+    if (error || !data) return "";
+
+    const lines = [];
+    for (const row of data) {
+      const m = row.menu_json?.menu;
+      if (!m) continue;
+      const dishes = [
+        m.soup?.title_en,
+        m.main?.title_en,
+        m.salad?.title_en,
+        m.side?.title_en,
+      ].filter(Boolean);
+      if (dishes.length) {
+        lines.push(`${row.menu_date}: ${dishes.join(" | ")}`);
+      }
+    }
+    return lines.join("\n");
+  } catch (e) {
+    console.warn("⚠️ Could not fetch recent menus:", e.message);
+    return "";
+  }
+}
+
+// ============================================================
 // Claude Menu Generation (EN + TR bilingual)
 // ============================================================
-async function callClaudeMenu(dateISO) {
+async function callClaudeMenu(dateISO, recentDishes = "") {
   const resp = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -107,7 +141,7 @@ async function callClaudeMenu(dateISO) {
     body: JSON.stringify({
       model: CLAUDE_MODEL,
       max_tokens: 8000,
-      temperature: 0.7,
+      temperature: 0.85,
       tools: [
         {
           name: "submit_menu",
@@ -205,6 +239,16 @@ async function callClaudeMenu(dateISO) {
             `- Absolutely no pork or pork products (no bacon, ham, lard, prosciutto, pepperoni, salami, pancetta)\n` +
             `- Absolutely no alcohol or alcohol-based ingredients\n` +
             `- Do NOT mention the word "pork" anywhere, not even as "pork-free"\n\n` +
+            (recentDishes
+              ? `RECENTLY USED DISHES (DO NOT REPEAT ANY OF THESE — choose completely different dishes):\n${recentDishes}\n\n`
+              : "") +
+            `VARIETY RULES (CRITICAL):\n` +
+            `- You MUST choose a DIFFERENT soup each day. Do NOT default to red lentil soup. Rotate through: yogurt soup, tarhana, ezogelin, tomato, mushroom, chicken broth, spinach, pumpkin, leek, celery, düğün çorbası, işkembe-style tripe-free soups, tavuk suyu, sebze çorbası, mercimek variations, etc.\n` +
+            `- You MUST choose a DIFFERENT main protein and cooking style each day. Rotate through: lamb, beef, chicken, fish, seafood, vegetarian/legume-based. Use different techniques: grilled, braised, roasted, stewed, kebab, köfte, stuffed, pan-seared, baked.\n` +
+            `- Do NOT use pomegranate sauce (nar sosu) more than once per week.\n` +
+            `- Do NOT repeat the same salad base — rotate between grain salads, green salads, roasted vegetable salads, bean salads, shepherd's salad, coban salata, piyaz, kisir, etc.\n` +
+            `- Do NOT repeat the same side dish — rotate between rice pilav, bulgur pilav, couscous, roasted vegetables, stuffed vegetables, börek, mücver, patates, makarna, etc.\n` +
+            `- Each day's menu should feel like it belongs to a DIFFERENT cuisine tradition: one day Turkish home cooking, another day Lebanese/Levantine, another day Moroccan/North African, another day Central Asian, another day Aegean/Mediterranean, another day South Asian, etc.\n\n` +
             `REQUIREMENTS:\n` +
             `- Provide both English and Turkish names/descriptions for everything\n` +
             `- For each dish, provide detailed step-by-step cooking instructions in BOTH English (steps_en) and Turkish (steps_tr)\n` +
@@ -212,7 +256,6 @@ async function callClaudeMenu(dateISO) {
             `- Each step should be one clear action (e.g. "Chop the onions finely and sauté in olive oil for 3 minutes")\n` +
             `- Include cooking times, temperatures, and practical tips in the steps\n` +
             `- Each dish needs a detailed image_prompt for AI food photography (describe the dish plated beautifully, top-down or 45-degree angle, natural lighting, restaurant quality)\n` +
-            `- Make the menu varied and interesting — use different cuisines (Turkish, Mediterranean, Middle Eastern, Asian, etc.)\n` +
             `- Include seasonal ingredients when possible\n\n` +
             `Return by calling the submit_menu tool.`,
         },
@@ -359,13 +402,17 @@ app.post("/menu/generate", async (req, res) => {
     const dateISO = req.body?.date || todayISO();
     console.log(`\n🍽️  Generating menu for ${dateISO}...`);
 
+    // Fetch recent menus to avoid repetition
+    const recentDishes = await getRecentDishNames(7);
+    if (recentDishes) console.log(`  📋 Recent dishes loaded for dedup`);
+
     let menuObj = null;
     let lastErr = null;
 
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
         console.log(`  Attempt ${attempt}/3...`);
-        menuObj = await callClaudeMenu(dateISO);
+        menuObj = await callClaudeMenu(dateISO, recentDishes);
 
         const menu = menuObj?.menu;
         if (!menu?.soup || !menu?.main || !menu?.salad || !menu?.side) {
@@ -500,12 +547,14 @@ app.post("/pipeline/run", async (req, res) => {
 
     // Step 1: Generate menu
     console.log("  Step 1/3: Generating menu...");
+    const recentDishes = await getRecentDishNames(7);
+    if (recentDishes) console.log(`  📋 Recent dishes loaded for dedup`);
     let menuObj = null;
     let lastErr = null;
 
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        menuObj = await callClaudeMenu(dateISO);
+        menuObj = await callClaudeMenu(dateISO, recentDishes);
         const menu = menuObj?.menu;
         if (!menu?.soup || !menu?.main || !menu?.salad || !menu?.side) {
           throw new Error("Missing dishes");
