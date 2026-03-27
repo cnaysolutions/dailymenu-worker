@@ -252,10 +252,13 @@ async function callClaudeMenu(dateISO, recentDishes = "") {
             `REQUIREMENTS:\n` +
             `- Provide both English and Turkish names/descriptions for everything\n` +
             `- For each dish, provide detailed step-by-step cooking instructions in BOTH English (steps_en) and Turkish (steps_tr)\n` +
-            `- Steps should be written like a home cook explaining to a friend — warm, clear, practical\n` +
-            `- Each step should be one clear action (e.g. "Chop the onions finely and sauté in olive oil for 3 minutes")\n` +
+            `- Steps should be written like a professional chef explaining to a home cook — clear, precise, with exact times and temperatures\n` +
+            `- Each step should be one clear action with specific measurements (e.g. "Heat 30ml olive oil in a heavy-bottomed pan over medium heat until shimmering, about 2 minutes")\n` +
             `- Include cooking times, temperatures, and practical tips in the steps\n` +
             `- Each dish needs a detailed image_prompt for AI food photography (describe the dish plated beautifully, top-down or 45-degree angle, natural lighting, restaurant quality)\n` +
+            `- INGREDIENT UNITS: Use ONLY standard metric units: g, kg, ml, L, tsp, tbsp. NEVER use vague terms like medium, large, small, whole, piece. Instead say 200g onion not 1 medium onion, 150g carrot not 2 large carrots\n` +
+            `- INGREDIENT PRECISION: Every ingredient must have an exact numeric quantity. Be realistic with portions for 4 people\n` +
+            `- DIET TAGS: Use only these tags: vegetarian, vegan, gluten-free, dairy-free, protein-rich, traditional, light, comfort-food. Do NOT include halal as a tag\n` +
             `- Include seasonal ingredients when possible\n\n` +
             `Return by calling the submit_menu tool.`,
         },
